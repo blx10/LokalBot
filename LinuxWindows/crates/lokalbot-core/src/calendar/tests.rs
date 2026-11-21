@@ -51,6 +51,21 @@ fn detects_teams_and_webex() {
 }
 
 #[test]
+fn detects_skype_for_business_and_skype() {
+    assert!(is_meeting_url(
+        "https://meet.lync.com/contoso/user/1A2B3C4D"
+    ));
+    assert!(is_meeting_url("https://join.skype.com/abc123"));
+    assert_eq!(
+        first_meeting_url(Some(
+            "Join Skype Meeting: https://meet.lync.com/contoso/user/1A2B3C4D"
+        ))
+        .as_deref(),
+        Some("https://meet.lync.com/contoso/user/1A2B3C4D")
+    );
+}
+
+#[test]
 fn detects_chinese_meeting_links() {
     for link in [
         "https://meeting.tencent.com/dm/AbCdEf12",

@@ -404,6 +404,7 @@ impl Drop for Engine {
 fn calendar_settings_changed(old: &Settings, new: &Settings) -> bool {
     old.calendar_detection_enabled != new.calendar_detection_enabled
         || old.calendar_evolution_enabled != new.calendar_evolution_enabled
+        || old.calendar_outlook_enabled != new.calendar_outlook_enabled
         || old.calendar_my_email_addresses != new.calendar_my_email_addresses
 }
 

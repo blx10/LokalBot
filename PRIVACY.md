@@ -1516,7 +1516,11 @@ platform differences:
     the system credential store, and only their host appears in Settings and
     in logs;
   - on Linux, the calendars of Evolution Data Server (including GNOME Online
-    Accounts), read on this computer over D-Bus.
+    Accounts), read on this computer over D-Bus;
+  - on Windows, the primary calendar of Classic Outlook while Outlook is open,
+    read on this computer over COM when you turn on **Use Classic Outlook
+    calendar** (off by default; LokalBot never starts Outlook when it is
+    closed).
   Events stay in memory. Matched recordings keep the same metadata as on
   macOS, including the agenda only with **Use invitation agendas**. The
   addresses you enter as your own are kept in settings to leave you out of

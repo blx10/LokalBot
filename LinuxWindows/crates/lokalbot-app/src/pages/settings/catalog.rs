@@ -1439,6 +1439,13 @@ pub const ENTRIES: &[Entry] = &[
         value: |s| on_off(s.calendar_evolution_enabled),
     },
     Entry {
+        id: "settings.calendarOutlookEnabled",
+        title: "Read calendar from Classic Outlook",
+        category: Meetings,
+        aliases: "outlook classic office mapi exchange calendar windows ltsc",
+        value: |s| on_off(s.calendar_outlook_enabled),
+    },
+    Entry {
         id: "settings.cotypingForgetLearned",
         title: "Forget learned completions",
         category: Writing,
@@ -1579,6 +1586,7 @@ pub fn focus_target<'a>(id: &'a str, settings: &Settings) -> &'a str {
                 | "calendarLinks"
                 | "calendarMyEmailAddresses"
                 | "calendarEvolutionEnabled"
+                | "calendarOutlookEnabled"
         )
     {
         return "settings.calendarDetectionEnabled";

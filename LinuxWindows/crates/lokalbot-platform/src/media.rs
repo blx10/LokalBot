@@ -18,6 +18,8 @@ const CONFERENCE_HOSTS: &[&str] = &[
     "meet.google.com",
     "teams.microsoft.com",
     "teams.live.com",
+    "lync.com",
+    "skype.com",
     "zoom.us",
     "webex.com",
     "app.slack.com",
@@ -25,7 +27,9 @@ const CONFERENCE_HOSTS: &[&str] = &[
 ];
 
 /// Conference apps that can publish a media session of their own.
-const CONFERENCE_PLAYERS: &[&str] = &["teams", "zoom", "webex", "slack", "discord"];
+const CONFERENCE_PLAYERS: &[&str] = &[
+    "teams", "zoom", "webex", "slack", "discord", "lync", "skype",
+];
 
 /// Browsers publish one player per page. A page with no known length is a live
 /// stream or a call, which pausing would lose (`pauseHTMLMediaJavaScript`).
@@ -473,6 +477,7 @@ mod tests {
             ..playing("org.mpris.MediaPlayer2.vlc")
         }));
         assert!(!may_pause(&playing("MSTeams_8wekyb3d8bbwe!MSTeams")));
+        assert!(!may_pause(&playing("lync.exe")));
         // A browser page with a length, on a video site and on a call.
         let page = |url: &str| Player {
             url: Some(url.into()),

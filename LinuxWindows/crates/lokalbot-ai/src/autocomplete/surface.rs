@@ -209,6 +209,7 @@ const TABLE: &[(SurfaceClass, &[&str])] = &[
             "element-desktop",
             "im.riot.riot",
             "skype",
+            "lync",
             "mattermost",
             "mattermost-desktop",
             "zulip",
@@ -414,6 +415,10 @@ mod tests {
         assert_eq!(SurfaceClass::of("olk.exe", "Outlook"), SurfaceClass::Email);
         assert_eq!(
             SurfaceClass::of("com.slack.Slack", "Slack"),
+            SurfaceClass::Chat
+        );
+        assert_eq!(
+            SurfaceClass::of("lync.exe", "Conversation"),
             SurfaceClass::Chat
         );
         assert_eq!(

@@ -2,11 +2,12 @@
 //! (`EventKitCalendarEventProvider` on macOS).
 //!
 //! Detection and recording read the cached events and never wait on the
-//! network: a refresh thread reads Evolution every minute and private links
-//! every five minutes, from yesterday to a week ahead (so the detector's
-//! −15/+90 minute window works across midnight, Today sees the whole day and
-//! People sees who is coming up in the next seven days). Nothing is read while
-//! calendar detection is off.
+//! network: a refresh thread reads Evolution (Linux) and Classic Outlook
+//! (Windows, while open) every minute and private links every five minutes,
+//! from yesterday to a week ahead (so the detector's −15/+90 minute window
+//! works across midnight, Today sees the whole day and People sees who is
+//! coming up in the next seven days). Nothing is read while calendar detection
+//! is off.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,7 +23,7 @@ use lokalbot_platform::calendar::{CalendarSources, ParseOptions};
 
 use crate::{EngineEvent, Shared};
 
-const EVOLUTION_INTERVAL: Duration = Duration::from_secs(60);
+const LOCAL_INTERVAL: Duration = Duration::from_secs(60);
 const LINK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 /// What Today and Settings show about the calendar.
@@ -151,6 +152,7 @@ impl CalendarThread {
 struct Cache {
     links: Option<(Instant, SourceResult)>,
     evolution: Option<(Instant, SourceResult)>,
+    outlook: Option<(Instant, SourceResult)>,
     window_day: Option<chrono::NaiveDate>,
 }
 
@@ -167,7 +169,7 @@ fn run(shared: Arc<Shared>, woken: Receiver<Wake>, stopped: Arc<AtomicBool>) {
     while !stopped.load(Ordering::Relaxed) {
         refresh(&shared, &mut cache, force);
         force = false;
-        match woken.recv_timeout(EVOLUTION_INTERVAL) {
+        match woken.recv_timeout(LOCAL_INTERVAL) {
             Ok(Wake::Refresh) => force = true,
             Ok(Wake::Stop) | Err(RecvTimeoutError::Disconnected) => break,
             Err(RecvTimeoutError::Timeout) => {}
@@ -185,7 +187,8 @@ fn refresh(shared: &Shared, cache: &mut Cache, force: bool) {
     }
     let links = calendar.links();
     let evolution = settings.calendar_evolution_enabled && cfg!(target_os = "linux");
-    if links.is_empty() && !evolution {
+    let outlook = settings.calendar_outlook_enabled && cfg!(windows);
+    if links.is_empty() && !evolution && !outlook {
         *cache = Cache::default();
         publish(
             shared,
@@ -200,7 +203,7 @@ fn refresh(shared: &Shared, cache: &mut Cache, force: bool) {
     let force = force || cache.window_day != Some(today);
     cache.window_day = Some(today);
     if calendar.snapshot().status == CalendarStatus::Off
-        || calendar.snapshot().status == CalendarStatus::NoSources
+        || (force && calendar.snapshot().status == CalendarStatus::NoSources)
     {
         let mut loading = calendar.snapshot();
         loading.status = CalendarStatus::Loading;
@@ -222,6 +225,7 @@ fn refresh(shared: &Shared, cache: &mut Cache, force: bool) {
             &CalendarSources {
                 links: links.clone(),
                 evolution: false,
+                outlook: false,
             },
             &options,
         );
@@ -229,21 +233,40 @@ fn refresh(shared: &Shared, cache: &mut Cache, force: bool) {
     }
     if !evolution {
         cache.evolution = None;
-    } else if stale(&cache.evolution, EVOLUTION_INTERVAL) {
+    } else if stale(&cache.evolution, LOCAL_INTERVAL) {
         let report = lokalbot_platform::calendar::fetch(
             &CalendarSources {
                 links: Vec::new(),
                 evolution: true,
+                outlook: false,
             },
             &options,
         );
         cache.evolution = Some((Instant::now(), report.into()));
     }
+    if !outlook {
+        cache.outlook = None;
+    } else if stale(&cache.outlook, LOCAL_INTERVAL) {
+        let report = lokalbot_platform::calendar::fetch(
+            &CalendarSources {
+                links: Vec::new(),
+                evolution: false,
+                outlook: true,
+            },
+            &options,
+        );
+        cache.outlook = Some((Instant::now(), report.into()));
+    }
 
     let mut events = Vec::new();
     let mut read = 0;
     let mut problems = Vec::new();
-    for (_, result) in cache.links.iter().chain(cache.evolution.iter()) {
+    for (_, result) in cache
+        .links
+        .iter()
+        .chain(cache.evolution.iter())
+        .chain(cache.outlook.iter())
+    {
         events.extend(result.events.iter().cloned());
         read += result.read;
         problems.extend(result.problems.iter().cloned());
