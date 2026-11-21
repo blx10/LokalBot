@@ -2599,3 +2599,5 @@
 "Priorities for today" = "أولويات اليوم";
 "Priorities from %@" = "أولويات من %@";
 "Priorities from a previous workday" = "أولويات من يوم عمل سابق";
+"Clear Selection" = "مسح التحديد";
+"Trim to Selection" = "قص إلى التحديد";

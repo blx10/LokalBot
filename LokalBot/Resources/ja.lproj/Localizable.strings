@@ -2599,3 +2599,5 @@
 "Priorities for today" = "今日の優先事項";
 "Priorities from %@" = "%@の優先事項";
 "Priorities from a previous workday" = "以前の稼働日の優先事項";
+"Clear Selection" = "選択を解除";
+"Trim to Selection" = "選択範囲にトリミング";

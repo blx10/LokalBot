@@ -2599,3 +2599,5 @@
 "Priorities for today" = "আজকের অগ্রাধিকার";
 "Priorities from %@" = "%@-এর অগ্রাধিকার";
 "Priorities from a previous workday" = "আগের এক কর্মদিবসের অগ্রাধিকার";
+"Clear Selection" = "নির্বাচন মুছুন";
+"Trim to Selection" = "নির্বাচন অনুযায়ী ছাঁটুন";

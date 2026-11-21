@@ -2599,3 +2599,5 @@
 "Priorities for today" = "Приоритеты на сегодня";
 "Priorities from %@" = "Приоритеты: %@";
 "Priorities from a previous workday" = "Приоритеты за предыдущий рабочий день";
+"Clear Selection" = "Снять выделение";
+"Trim to Selection" = "Обрезать по выделению";

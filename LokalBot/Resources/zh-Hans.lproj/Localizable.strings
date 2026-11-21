@@ -2598,3 +2598,5 @@
 "Priorities for today" = "今天的优先事项";
 "Priorities from %@" = "%@的优先事项";
 "Priorities from a previous workday" = "之前某个工作日的优先事项";
+"Clear Selection" = "清除选区";
+"Trim to Selection" = "裁剪为所选范围";

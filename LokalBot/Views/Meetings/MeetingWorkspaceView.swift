@@ -180,6 +180,7 @@ private struct MeetingWorkspaceDetail: View {
     @State private var calendarSpeakerCandidates: [CalendarParticipantIdentity] = []
     @State private var exportError: String?
     @State private var editingBoundaries = false
+    @State private var audioSelection: Meeting.ContentRange?
     @State private var undoMergeConfirmation = false
     @State private var speechError: String?
     @State private var isExportingAudio = false
@@ -354,6 +355,10 @@ private struct MeetingWorkspaceDetail: View {
                 player.pause()
                 stopSpeech(clearError: false)
             }
+        }
+        .onChange(of: meeting.contentRange) { _, newRange in
+            player.setPlaybackRange(newRange)
+            audioSelection = nil
         }
         .onChange(of: app.meetingPageSearchRequestRevision) {
             guard app.presentedMeetingSearchID == meeting.id else { return }
@@ -603,7 +608,12 @@ private struct MeetingWorkspaceDetail: View {
                 playhead: derived.playhead,
                 speakerName: { key in transcript.map { speakerPresentation.speaker(key, in: $0) } ?? key },
                 speakerColorIndex: { speakerPresentation.colorIndex(for: $0) },
-                onShowInTranscript: showInTranscript)
+                selection: $audioSelection,
+                isBusy: isProcessing,
+                hasTrimmedBoundaries: meeting.contentRange != nil,
+                onShowInTranscript: showInTranscript,
+                onTrimSelection: trimToSelection,
+                onRestoreFullRecording: restoreFullRecording)
         } else {
             HStack(spacing: 12) {
                 Image(systemName: "play.circle.fill").font(.system(size: 28))
@@ -1284,10 +1294,13 @@ private struct MeetingWorkspaceDetail: View {
         }
         // A pipeline artifact refresh must not reset or re-prepare active audio.
         if !player.isLoaded {
-            await player.loadInBackground(folder: folder, hasSystemTrack: meeting.hasSystemTrack)
+            await player.loadInBackground(
+                folder: folder,
+                hasSystemTrack: meeting.hasSystemTrack,
+                contentRange: meeting.contentRange)
             guard !Task.isCancelled else { return }
             player.speed = app.meetingPlaybackSpeeds[meeting.id] ?? 1
-            player.seek(to: app.meetingPlaybackPositions[meeting.id] ?? 0)
+            player.seek(to: app.meetingPlaybackPositions[meeting.id] ?? player.windowStart)
         }
         documentLoading = false
         consumeMeetingSeek()
@@ -1362,6 +1375,29 @@ private struct MeetingWorkspaceDetail: View {
         evidenceSegment = caption.segmentIndex
         tab = .transcript
         evidenceRevision &+= 1
+    }
+
+    private func trimToSelection(_ range: Meeting.ContentRange) {
+        exportError = nil
+        player.pause()
+        do {
+            try app.setMeetingBoundaries(range, for: meeting)
+            audioSelection = nil
+        } catch {
+            exportError = error.localizedDescription
+        }
+    }
+
+    private func restoreFullRecording() {
+        exportError = nil
+        let raw = max(player.rawDuration, meeting.recordedDuration ?? 0, meeting.duration ?? 0)
+        guard raw > 0 else { return }
+        do {
+            try app.setMeetingBoundaries(.init(start: 0, end: raw), for: meeting)
+            audioSelection = nil
+        } catch {
+            exportError = error.localizedDescription
+        }
     }
 
     private func segmentIndex(at seconds: TimeInterval) -> Int? {

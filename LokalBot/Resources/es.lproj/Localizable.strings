@@ -2599,3 +2599,5 @@
 "Priorities for today" = "Prioridades para hoy";
 "Priorities from %@" = "Prioridades del %@";
 "Priorities from a previous workday" = "Prioridades de un día laborable anterior";
+"Clear Selection" = "Borrar selección";
+"Trim to Selection" = "Recortar a la selección";

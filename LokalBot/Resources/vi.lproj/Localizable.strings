@@ -2599,3 +2599,5 @@
 "Priorities for today" = "Ưu tiên hôm nay";
 "Priorities from %@" = "Ưu tiên từ %@";
 "Priorities from a previous workday" = "Ưu tiên từ một ngày làm việc trước";
+"Clear Selection" = "Xóa vùng chọn";
+"Trim to Selection" = "Cắt theo vùng chọn";
