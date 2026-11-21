@@ -603,7 +603,6 @@ private struct MeetingWorkspaceDetail: View {
                 playhead: derived.playhead,
                 speakerName: { key in transcript.map { speakerPresentation.speaker(key, in: $0) } ?? key },
                 speakerColorIndex: { speakerPresentation.colorIndex(for: $0) },
-                showsTranscriptLink: tab != .transcript,
                 onShowInTranscript: showInTranscript)
         } else {
             HStack(spacing: 12) {
@@ -1357,8 +1356,8 @@ private struct MeetingWorkspaceDetail: View {
         player.play(at: seconds)
     }
 
-    /// The player's "Show in transcript": go to the line being said, without
-    /// interrupting playback.
+    /// The player's caption click: go to the line being said on any tab,
+    /// without interrupting playback.
     private func showInTranscript(_ caption: MeetingDetailPresentation.Caption) {
         evidenceSegment = caption.segmentIndex
         tab = .transcript

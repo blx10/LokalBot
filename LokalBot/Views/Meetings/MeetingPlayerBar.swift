@@ -1,8 +1,8 @@
 import SwiftUI
 
 /// The meeting's player: one slim bar under the header on every tab. It shows
-/// who is speaking and what is being said at the playhead, so a time played
-/// from the summary can be followed without leaving the summary.
+/// who is speaking and what is being said at the playhead; clicking the caption
+/// jumps to that line in the transcript on any tab.
 struct MeetingPlayerBar: View {
     @ObservedObject var player: MeetingPlayer
     @ObservedObject private var clock: MeetingPlaybackClock
@@ -10,13 +10,10 @@ struct MeetingPlayerBar: View {
     let playhead: MeetingDetailPresentation.PlayheadIndex
     let speakerName: (String) -> String
     let speakerColorIndex: (String) -> Int
-    /// The transcript tab already shows the line, so the link is left out there.
-    var showsTranscriptLink = true
     let onShowInTranscript: (MeetingDetailPresentation.Caption) -> Void
 
     init(player: MeetingPlayer, folder: URL, playhead: MeetingDetailPresentation.PlayheadIndex,
          speakerName: @escaping (String) -> String, speakerColorIndex: @escaping (String) -> Int,
-         showsTranscriptLink: Bool = true,
          onShowInTranscript: @escaping (MeetingDetailPresentation.Caption) -> Void) {
         self.player = player
         self.clock = player.clock
@@ -24,7 +21,6 @@ struct MeetingPlayerBar: View {
         self.playhead = playhead
         self.speakerName = speakerName
         self.speakerColorIndex = speakerColorIndex
-        self.showsTranscriptLink = showsTranscriptLink
         self.onShowInTranscript = onShowInTranscript
     }
 
@@ -51,7 +47,7 @@ struct MeetingPlayerBar: View {
                     sources: player.waveformSources,
                     currentTime: clock.currentTime,
                     duration: player.duration,
-                    height: caption == nil ? 40 : 24,
+                    height: caption == nil ? 60 : 36,
                     onSeek: { player.seek(to: $0) })
                     .id(folder)
             }
@@ -77,7 +73,9 @@ struct MeetingPlayerBar: View {
     }
 
     private func captionRow(_ caption: MeetingDetailPresentation.Caption) -> some View {
-        HStack(spacing: 6) {
+        Button {
+            onShowInTranscript(caption)
+        } label: {
             HStack(spacing: 6) {
                 Circle().fill(LBTokens.Palette.speaker(at: speakerColorIndex(caption.speakerKey)))
                     .frame(width: 7, height: 7)
@@ -92,17 +90,15 @@ struct MeetingPlayerBar: View {
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .contentLayoutDirection(of: caption.text)
+                Spacer(minLength: 0)
             }
-            .accessibilityElement(children: .combine)
-            .accessibilityIdentifier("meeting.player.caption")
-            Spacer(minLength: 6)
-            if showsTranscriptLink {
-                Button("Show in transcript") { onShowInTranscript(caption) }
-                    .buttonStyle(.workspaceLink)
-                    .font(AppFont.scaled(.callout))
-                    .fixedSize()
-                    .accessibilityIdentifier("meeting.player.showInTranscript")
-            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
+        .help("Show in transcript")
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(speakerName(caption.speakerKey)): \(caption.text)")
+        .accessibilityIdentifier("meeting.player.caption")
     }
 }

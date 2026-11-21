@@ -7,7 +7,7 @@ struct WaveformView: View {
     let currentTime: TimeInterval
     let duration: TimeInterval
     /// The meeting's slim player bar draws a shorter overview.
-    var height: CGFloat = 40
+    var height: CGFloat = 60
     let onSeek: (TimeInterval) -> Void
 
     @State private var peaks: [Float]?
