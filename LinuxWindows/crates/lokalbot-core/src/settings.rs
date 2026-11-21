@@ -122,6 +122,9 @@ pub struct Settings {
     pub use_calendar_agenda: bool,
     pub meeting_notes_use_calendar_context: bool,
     pub calendar_evolution_enabled: bool,
+    /// Windows: also read the primary calendar of Classic Outlook while it is
+    /// open. Local; makes no network request of its own and never launches Outlook.
+    pub calendar_outlook_enabled: bool,
     pub calendar_my_email_addresses: String,
 
     pub selection_actions_enabled: bool,
@@ -327,6 +330,7 @@ impl Default for Settings {
             use_calendar_agenda: false,
             meeting_notes_use_calendar_context: true,
             calendar_evolution_enabled: true,
+            calendar_outlook_enabled: false,
             calendar_my_email_addresses: String::new(),
             selection_actions_enabled: false,
             selection_actions_shortcut: "Ctrl+Alt+Space".into(),

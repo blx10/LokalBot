@@ -546,6 +546,7 @@ mod tests {
             "meetingNoteExportFolder",
             "recordSystemAudio",
             "calendarEvolutionEnabled",
+            "calendarOutlookEnabled",
             "checkForUpdates",
         ] {
             assert_eq!(spec(key).unwrap().tier, SettingTier::Consent, "{key}");

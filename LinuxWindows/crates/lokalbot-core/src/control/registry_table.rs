@@ -1630,6 +1630,15 @@ pub(super) fn table() -> Vec<SettingSpec> {
             "Linux: also read calendars from Evolution Data Server, which includes GNOME Online Accounts.",
         ),
         e(
+            "calendarOutlookEnabled",
+            Recording,
+            "Read calendar from Classic Outlook",
+            Bool,
+            Consent,
+            "outlook classic office mapi exchange calendar windows ltsc",
+            "Windows: read the primary calendar of Classic Outlook while Outlook is open.",
+        ),
+        e(
             "calendarMyEmailAddresses",
             Recording,
             "My email addresses",

@@ -31,6 +31,8 @@ pub mod provider {
     pub const ICS: &str = "ics";
     pub const CALDAV: &str = "caldav";
     pub const EDS: &str = "eds";
+    /// Classic Outlook on Windows, read locally over COM/MAPI while open.
+    pub const OUTLOOK: &str = "outlook";
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

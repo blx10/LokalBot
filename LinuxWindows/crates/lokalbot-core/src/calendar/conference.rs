@@ -2,12 +2,14 @@ use std::sync::LazyLock;
 
 use regex::Regex;
 
-pub const CONFERENCE_HOSTS: [&str; 18] = [
+pub const CONFERENCE_HOSTS: [&str; 20] = [
     "meet.google.com",
     "zoom.us",
     "zoom.com",
     "teams.microsoft.com",
     "teams.live.com",
+    "lync.com",
+    "skype.com",
     "webex.com",
     "whereby.com",
     "meet.jit.si",

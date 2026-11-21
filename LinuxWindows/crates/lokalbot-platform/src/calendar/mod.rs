@@ -2,6 +2,8 @@
 mod eds;
 pub mod feed;
 pub mod ics;
+#[cfg(any(windows, test))]
+mod outlook;
 
 use lokalbot_core::calendar::CalendarEvent;
 
@@ -12,15 +14,21 @@ pub use ics::ParseOptions;
 pub struct CalendarSources {
     pub links: Vec<String>,
     pub evolution: bool,
+    /// Windows: read Classic Outlook's primary calendar while open.
+    pub outlook: bool,
 }
 
 impl CalendarSources {
     pub fn is_empty(&self) -> bool {
-        self.links.is_empty() && !self.evolution_available()
+        self.links.is_empty() && !self.evolution_available() && !self.outlook_available()
     }
 
     fn evolution_available(&self) -> bool {
         self.evolution && cfg!(target_os = "linux")
+    }
+
+    fn outlook_available(&self) -> bool {
+        self.outlook && cfg!(windows)
     }
 }
 
@@ -56,6 +64,21 @@ pub fn fetch(sources: &CalendarSources, options: &ParseOptions) -> FetchReport {
             Ok(None) => log::debug!("calendar: Evolution Data Server is not installed"),
             Err(err) => {
                 let problem = format!("Evolution Data Server: {err:#}");
+                log::warn!("calendar: {problem}");
+                report.problems.push(problem);
+            }
+        }
+    }
+    #[cfg(windows)]
+    if sources.outlook {
+        match outlook::fetch(options) {
+            Ok(Some(events)) => {
+                report.sources_read += 1;
+                report.events.extend(events);
+            }
+            Ok(None) => log::debug!("calendar: Classic Outlook is not running"),
+            Err(err) => {
+                let problem = format!("Classic Outlook: {err:#}");
                 log::warn!("calendar: {problem}");
                 report.problems.push(problem);
             }

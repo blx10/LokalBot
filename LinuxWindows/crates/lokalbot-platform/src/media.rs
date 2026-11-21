@@ -10,13 +10,17 @@ const CONFERENCE_HOSTS: &[&str] = &[
     "meet.google.com",
     "teams.microsoft.com",
     "teams.live.com",
+    "lync.com",
+    "skype.com",
     "zoom.us",
     "webex.com",
     "app.slack.com",
     "discord.com",
 ];
 
-const CONFERENCE_PLAYERS: &[&str] = &["teams", "zoom", "webex", "slack", "discord"];
+const CONFERENCE_PLAYERS: &[&str] = &[
+    "teams", "zoom", "webex", "slack", "discord", "lync", "skype",
+];
 
 const BROWSER_PLAYERS: &[&str] = &[
     "chrome",
@@ -446,6 +450,7 @@ mod tests {
             ..playing("org.mpris.MediaPlayer2.vlc")
         }));
         assert!(!may_pause(&playing("MSTeams_8wekyb3d8bbwe!MSTeams")));
+        assert!(!may_pause(&playing("lync.exe")));
         let page = |url: &str| Player {
             url: Some(url.into()),
             ..playing("org.mpris.MediaPlayer2.chromium.instance42")
