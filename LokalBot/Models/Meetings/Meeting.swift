@@ -45,6 +45,11 @@ struct Meeting: Identifiable, Codable, Equatable, Sendable {
     /// old row across launches without deleting its original evidence.
     var mergedIntoMeetingID: UUID?
 
+    /// Source meeting when this record was extracted from a selected interval
+    /// of another recording, so screen context from that interval remains
+    /// queryable without duplicating screenshots.
+    var extractedFromMeetingID: UUID?
+
     /// The original file names when this meeting came from audio or video
     /// files the user imported rather than recordings made on this Mac. The
     /// screen during their time span shows what the user was doing then, not
