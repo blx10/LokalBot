@@ -165,6 +165,9 @@ pub struct Settings {
     /// Linux: also read calendars from Evolution Data Server, which includes
     /// GNOME Online Accounts. Local; makes no network request of its own.
     pub calendar_evolution_enabled: bool,
+    /// Windows: also read the primary calendar of Classic Outlook while it is
+    /// open. Local; makes no network request of its own and never launches Outlook.
+    pub calendar_outlook_enabled: bool,
     /// The user's own addresses, comma-separated, so feeds can tell the user
     /// from other attendees and skip invitations the user declined.
     pub calendar_my_email_addresses: String,
@@ -396,6 +399,7 @@ impl Default for Settings {
             use_calendar_agenda: false,
             meeting_notes_use_calendar_context: true,
             calendar_evolution_enabled: true,
+            calendar_outlook_enabled: false,
             calendar_my_email_addresses: String::new(),
             selection_actions_enabled: false,
             selection_actions_shortcut: "Ctrl+Alt+Space".into(),

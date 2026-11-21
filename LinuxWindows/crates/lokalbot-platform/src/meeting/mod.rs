@@ -140,6 +140,7 @@ enum AppKind {
     Zoom,
     Webex,
     Teams,
+    SkypeForBusiness,
     Slack,
     Discord,
     TencentMeeting,
@@ -164,6 +165,7 @@ impl AppKind {
             Self::Zoom => "Zoom",
             Self::Webex => "Webex",
             Self::Teams => "Teams",
+            Self::SkypeForBusiness => "Skype for Business",
             Self::Slack => "Slack",
             Self::Discord => "Discord",
             Self::TencentMeeting => "Tencent Meeting",
@@ -198,6 +200,7 @@ impl AppKind {
         matches!(
             self,
             Self::Teams
+                | Self::SkypeForBusiness
                 | Self::Slack
                 | Self::Discord
                 | Self::Feishu
@@ -218,7 +221,7 @@ impl AppKind {
     fn priority(self) -> u8 {
         match self {
             Self::Zoom | Self::Webex | Self::TencentMeeting | Self::VoovMeeting => 0,
-            Self::Teams => 1,
+            Self::Teams | Self::SkypeForBusiness => 1,
             Self::Meet | Self::TelemostWeb | Self::MtsLink | Self::WebCall(_) => 2,
             #[cfg(windows)]
             Self::TelemostDesktop => 3,
@@ -239,6 +242,7 @@ fn native_kind(process: &str) -> Option<AppKind> {
         "zoom" | "zoom.real" | "cpthost" | "zoomwebviewhost" | "zoomworkplace" => AppKind::Zoom,
         "ciscocollabhost" | "atmgr" | "webex" | "webexmta" | "webexhost" => AppKind::Webex,
         "ms-teams" | "teams" | "teams-for-linux" | "msteams" => AppKind::Teams,
+        "lync" => AppKind::SkypeForBusiness,
         "slack" => AppKind::Slack,
         "discord" | "discordptb" | "discordcanary" | "vesktop" => AppKind::Discord,
         "wemeetapp" | "wemeet" | "tencentmeeting" => AppKind::TencentMeeting,
@@ -347,6 +351,10 @@ fn link_kind(url: &str) -> Option<AppKind> {
         AppKind::WebCall("Zoom")
     } else if is("teams.microsoft.com") || is("teams.live.com") {
         AppKind::WebCall("Teams")
+    } else if is("lync.com") {
+        AppKind::WebCall("Skype for Business")
+    } else if is("skype.com") {
+        AppKind::WebCall("Skype")
     } else if is("webex.com") {
         AppKind::WebCall("Webex")
     } else if is("jit.si") {
@@ -1248,6 +1256,46 @@ mod tests {
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].0, 12);
         assert!(matches!(&events[0].1, DetectorEvent::Started(m) if m.app_name == "Teams"));
+    }
+
+    #[test]
+    fn skype_for_business_lync_follows_teams_rules_and_links() {
+        assert_eq!(
+            native_kind("lync.exe").map(AppKind::name),
+            Some("Skype for Business")
+        );
+        assert_eq!(
+            link_kind("https://meet.lync.com/org/user/1234"),
+            Some(AppKind::WebCall("Skype for Business"))
+        );
+        assert_eq!(
+            link_kind("https://join.skype.com/abc123"),
+            Some(AppKind::WebCall("Skype"))
+        );
+
+        let start = Instant::now();
+        let mut core = Core::new(1);
+        let lync = evidence(&[stream(9, "lync.exe")]);
+        assert!(run(&mut core, start, 0, 10, &lync).is_empty());
+        let events = run(&mut core, start, 12, 14, &lync);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, 12);
+        assert!(
+            matches!(&events[0].1, DetectorEvent::Started(m) if m.app_name == "Skype for Business")
+        );
+
+        let mut backed = Core::new(1);
+        backed.calendar.active = true;
+        let events = run(
+            &mut backed,
+            start,
+            0,
+            0,
+            &evidence(&[stream(9, "lync.exe")]),
+        );
+        assert!(
+            matches!(&events[..], [(0, DetectorEvent::Started(m))] if m.app_name == "Skype for Business")
+        );
     }
 
     #[test]

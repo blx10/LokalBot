@@ -49,6 +49,8 @@ pub mod provider {
     pub const CALDAV: &str = "caldav";
     /// Evolution Data Server, which includes GNOME Online Accounts (Linux).
     pub const EDS: &str = "eds";
+    /// Classic Outlook on Windows, read locally over COM/MAPI while open.
+    pub const OUTLOOK: &str = "outlook";
 }
 
 /// The fields meeting filtering needs, independent of any calendar format

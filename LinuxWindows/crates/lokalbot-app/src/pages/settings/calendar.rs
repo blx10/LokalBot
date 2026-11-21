@@ -151,6 +151,19 @@ impl SettingsPage {
                 ),
             );
         }
+        if cfg!(windows) {
+            section = section.row(
+                "settings.calendarOutlookEnabled",
+                self.toggle(
+                    "settings.calendarOutlookEnabled",
+                    lokalbot_i18n::tr("Use Classic Outlook calendar"),
+                    Some(lokalbot_i18n::tr("Reads the primary calendar of Classic Outlook on this PC while Outlook is open. Nothing is read when Outlook is closed.")),
+                    settings.calendar_outlook_enabled,
+                    |s, v| s.calendar_outlook_enabled = v,
+                    cx,
+                ),
+            );
+        }
         section
             .row(
                 "settings.calendarMyEmailAddresses",
@@ -333,9 +346,19 @@ impl SettingsPage {
             chrono::Local::now().date_naive(),
         )
         .len();
+        let outlook_only = cfg!(windows)
+            && self.data.read(cx).settings.calendar_outlook_enabled
+            && snapshot.link_count == 0;
         let status: SharedString = match snapshot.status {
             CalendarStatus::Off | CalendarStatus::NoSources => {
-                lokalbot_i18n::tr("No calendar is connected yet.").into()
+                if outlook_only && snapshot.status == CalendarStatus::NoSources {
+                    lokalbot_i18n::tr(
+                        "Outlook is not running. Open Classic Outlook to read its calendar.",
+                    )
+                    .into()
+                } else {
+                    lokalbot_i18n::tr("No calendar is connected yet.").into()
+                }
             }
             CalendarStatus::Loading => lokalbot_i18n::tr("Reading your calendars…").into(),
             CalendarStatus::Ready => lokalbot_i18n::format(
