@@ -576,21 +576,12 @@ fn evidence_expires_but_names_stay() {
 }
 
 #[test]
-fn enrollment_needs_three_turns_totaling_fifteen_seconds() {
+fn enrollment_needs_two_turns_totaling_eight_seconds() {
     let (_dir, library) = library();
     let memory = memory(&library);
     let first = meeting(&library);
     let transcript = Transcript {
-        segments: (0..2)
-            .map(|i| {
-                segment(
-                    i as f64 * 7.0,
-                    i as f64 * 7.0 + 6.0,
-                    "them 1",
-                    AttributionSource::System,
-                )
-            })
-            .collect(),
+        segments: vec![segment(0.0, 6.0, "them 1", AttributionSource::System)],
         engine: "test".into(),
         ..Default::default()
     };
@@ -598,7 +589,7 @@ fn enrollment_needs_three_turns_totaling_fifteen_seconds() {
         &memory,
         &first,
         &transcript,
-        call_samples("them 1", 3).into_iter().take(2).collect(),
+        call_samples("them 1", 3).into_iter().take(1).collect(),
     );
     memory
         .choose(
@@ -612,8 +603,40 @@ fn enrollment_needs_three_turns_totaling_fifteen_seconds() {
         memory
             .notice()
             .unwrap()
-            .contains("three separate clear turns")
+            .contains("two separate clear turns")
     );
+
+    let second = meeting(&library);
+    let two_transcript = Transcript {
+        segments: (0..2)
+            .map(|i| {
+                segment(
+                    i as f64 * 7.0,
+                    i as f64 * 7.0 + 4.0,
+                    "them 1",
+                    AttributionSource::System,
+                )
+            })
+            .collect(),
+        engine: "test".into(),
+        ..Default::default()
+    };
+    let two_samples: Vec<VoiceSample> = (0..2)
+        .map(|i| {
+            let mut s = sample("them 1", i as f64 * 7.0, 3, i, AttributionSource::System);
+            s.range.end = s.range.start + 4.0;
+            s
+        })
+        .collect();
+    let saved_two = process(&memory, &second, &two_transcript, two_samples);
+    memory
+        .choose(
+            &Choice::new("them 1", Some("Ana".into()), DecisionAction::Assign),
+            &second,
+            &saved_two,
+        )
+        .unwrap();
+    assert_eq!(memory.profiles().unwrap().len(), 1);
 }
 
 #[test]
@@ -883,4 +906,72 @@ fn suggesting_only_leaves_names_to_a_person_and_a_strong_match_is_recognized() {
         .unwrap();
     assert_eq!(applied.speaker_aliases["them 1"], "Ana");
     assert_eq!(memory.profiles().unwrap()[0].contributions.len(), 2);
+}
+
+#[test]
+fn relaxed_suggestions_cross_channel_same_person_and_live_suggestions() {
+    let (_dir, library) = library();
+    let memory = memory(&library);
+    let first = meeting(&library);
+    let saved = process(
+        &memory,
+        &first,
+        &call_transcript("them 1"),
+        call_samples("them 1", 3),
+    );
+    memory
+        .choose(
+            &Choice::new("them 1", Some("Alper".into()), DecisionAction::Assign),
+            &first,
+            &saved,
+        )
+        .unwrap();
+    let profiles = memory.profiles().unwrap();
+    assert_eq!(profiles.len(), 1);
+    let other_voice = call_samples("them 1", 40);
+    assert_eq!(
+        same_person("alper", &other_voice, &profiles),
+        Some(profiles[0].id)
+    );
+    assert_eq!(same_person("Other", &other_voice, &profiles), None);
+
+    let single = vec![sample("them 1", 0.0, 3, 0, AttributionSource::System)];
+    let single_match = matches(&single, &profiles);
+    assert_eq!(single_match.len(), 1);
+    assert_eq!(single_match[0].tier, MatchTier::Suggested);
+
+    let mut mild = call_samples("them 1", 3);
+    for s in &mut mild {
+        s.vector = vec![0f32; VOICE_DIMENSION];
+        s.vector[3] = 0.50;
+        s.vector[10] = 0.866_025_4;
+    }
+    let mild_match = matches(&mild, &profiles);
+    assert_eq!(mild_match.len(), 1);
+    assert_eq!(mild_match[0].tier, MatchTier::Suggested);
+
+    let mic_query: Vec<VoiceSample> = call_samples("local 1", 3)
+        .into_iter()
+        .map(|mut s| {
+            s.source = Some(AttributionSource::Microphone);
+            s
+        })
+        .collect();
+    assert!(matches(&mic_query, &profiles).is_empty());
+    let cross = matches_with_options(&mic_query, &profiles, true);
+    assert_eq!(cross.len(), 1);
+    assert_eq!(cross[0].tier, MatchTier::Suggested);
+    assert_eq!(cross[0].name, "Alper");
+
+    let old_meeting = meeting(&library);
+    let old_transcript = call_transcript("them 1");
+    let _ = process(
+        &memory,
+        &old_meeting,
+        &old_transcript,
+        call_samples("them 1", 3),
+    );
+    let old_state = memory.state(&old_meeting).unwrap();
+    let live = live_suggestions(Some(&old_state), Some(&old_transcript), &profiles);
+    assert_eq!(live["them 1"][0].name, "Alper");
 }

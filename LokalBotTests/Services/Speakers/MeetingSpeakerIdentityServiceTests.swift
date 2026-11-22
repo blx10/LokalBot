@@ -352,7 +352,7 @@ import XCTest
         XCTAssertEqual(profiles.first { $0.name == "Alex" }?.contributions.map(\.meetingID), [first.id])
     }
 
-    func testNamingTheSamePersonAgainAddsToTheirProfileButADifferentVoiceGetsItsOwn() {
+    func testNamingTheSamePersonAgainReusesTheirSingleProfileEvenWithDifferentVoice() {
         func samples(axis: Int) -> [SpeakerVoiceSample] {
             var vector = [Float](repeating: 0, count: 256); vector[axis] = 1
             return (0..<4).map { SpeakerVoiceSample(speaker: "them", range: .init(start: Double($0 * 20), end: Double($0 * 20 + 10)),
@@ -363,8 +363,23 @@ import XCTest
             .init(meetingID: UUID(), audioRevision: "a", speakerID: UUID(), decisionID: UUID(), confirmedAt: Date(),
                   samples: Array(samples(axis: 0).prefix(1)), voiceprint: vector)])
         XCTAssertEqual(MeetingSpeakerIdentityService.samePerson(named: "alex", samples: samples(axis: 0), profiles: [alex]), alex.id)
-        XCTAssertNil(MeetingSpeakerIdentityService.samePerson(named: "Alex", samples: samples(axis: 1), profiles: [alex]))
+        XCTAssertEqual(MeetingSpeakerIdentityService.samePerson(named: "Alex", samples: samples(axis: 1), profiles: [alex]), alex.id)
         XCTAssertNil(MeetingSpeakerIdentityService.samePerson(named: "Sam", samples: samples(axis: 0), profiles: [alex]))
+    }
+
+    func testLiveSuggestionsMatchUpdatedProfilesImmediately() async throws {
+        let (oldMeeting, oldAudio, oldTranscript, oldTurns, oldSamples) = try fixture()
+        _ = await service.process(transcript: oldTranscript, meeting: oldMeeting, turns: oldTurns, samples: oldSamples, audioURL: oldAudio)
+        let oldState = try await service.state(for: oldMeeting)
+        XCTAssertTrue(MeetingSpeakerIdentityService.liveSuggestions(for: oldState, transcript: oldTranscript, profiles: []).isEmpty)
+
+        let (newer, newAudio, newTranscript, newTurns, newSamples) = try fixture()
+        let processed = await service.process(transcript: newTranscript, meeting: newer, turns: newTurns, samples: newSamples, audioURL: newAudio)
+        _ = try await service.choose(.init(label: "them", name: "Alex"), meeting: newer, transcript: processed)
+
+        let profiles = try await service.profiles()
+        let live = MeetingSpeakerIdentityService.liveSuggestions(for: oldState, transcript: oldTranscript, profiles: profiles)
+        XCTAssertEqual(live["them"]?.first?.name, "Alex")
     }
 
     func testNamesGivenBeforeCallVoicesWereRememberedSuggestNamesInRecentMeetings() async throws {

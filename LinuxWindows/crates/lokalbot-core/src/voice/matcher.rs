@@ -8,7 +8,10 @@ use super::{
 pub mod call {
     pub const SAMPLE_LIMIT: usize = 16;
     pub const MINIMUM_CONSISTENCY: f64 = 0.75;
-    pub const SUGGESTED_SCORE: f64 = 0.60;
+    pub const MINIMUM_ENROLLMENT_CHUNKS: usize = 2;
+    pub const MINIMUM_ENROLLMENT_SECONDS: f64 = 8.0;
+    pub const SUGGESTED_SCORE: f64 = 0.45;
+    pub const CROSS_CHANNEL_SUGGESTED_SCORE: f64 = 0.50;
     pub const AUTOMATIC_SCORE: f64 = 0.70;
     pub const AUTOMATIC_MARGIN: f64 = 0.15;
     pub const POLICY_VERSION: &str = "call-voiceprint-1";
@@ -114,6 +117,27 @@ fn call_voiceprint(profile: &VoiceProfile) -> Option<Voiceprint> {
     voiceprint(&meetings.iter().map(Vec::as_slice).collect::<Vec<_>>())
 }
 
+fn mic_voiceprint(profile: &VoiceProfile) -> Option<Voiceprint> {
+    if profile.model != VOICE_MODEL {
+        return None;
+    }
+    let vectors: Vec<&[f32]> = profile
+        .contributions
+        .iter()
+        .flat_map(|c| &c.samples)
+        .filter(|s| {
+            s.model == VOICE_MODEL
+                && normalized(&s.vector).is_some()
+                && s.resolved_source() == AttributionSource::Microphone
+        })
+        .map(|s| s.vector.as_slice())
+        .collect();
+    if vectors.is_empty() {
+        return None;
+    }
+    voiceprint(&vectors)
+}
+
 pub fn eligible(samples: &[VoiceSample], turns: &[AudioTurn], speaker: &str) -> Vec<VoiceSample> {
     if turns
         .iter()
@@ -162,7 +186,7 @@ pub fn eligible(samples: &[VoiceSample], turns: &[AudioTurn], speaker: &str) -> 
     let consistent = selected.iter().all(|a| {
         selected
             .iter()
-            .all(|b| cosine(&a.vector, &b.vector) >= 0.75)
+            .all(|b| cosine(&a.vector, &b.vector) >= call::MINIMUM_CONSISTENCY)
     });
     if consistent { selected } else { Vec::new() }
 }
@@ -211,7 +235,7 @@ pub fn can_enroll(samples: &[VoiceSample]) -> bool {
         return false;
     };
     let is_call = first.resolved_source() == AttributionSource::System;
-    if samples.len() < 3
+    if samples.len() < call::MINIMUM_ENROLLMENT_CHUNKS
         || samples.len() > if is_call { call::SAMPLE_LIMIT } else { 8 }
         || samples.iter().any(|s| {
             s.model != VOICE_MODEL || !s.range.is_valid() || normalized(&s.vector).is_none()
@@ -220,14 +244,15 @@ pub fn can_enroll(samples: &[VoiceSample]) -> bool {
         || samples
             .iter()
             .any(|s| s.resolved_source() != first.resolved_source())
-        || samples.iter().map(|s| s.range.duration()).sum::<f64>() < 15.0
+        || samples.iter().map(|s| s.range.duration()).sum::<f64>() < call::MINIMUM_ENROLLMENT_SECONDS
     {
         return false;
     }
     for (index, sample) in samples.iter().enumerate() {
         for other in &samples[index + 1..] {
             if sample.range.overlap(&other.range) > 0.0
-                || (!is_call && cosine(&sample.vector, &other.vector) < 0.75)
+                || (!is_call
+                    && cosine(&sample.vector, &other.vector) < call::MINIMUM_CONSISTENCY)
             {
                 return false;
             }
@@ -238,6 +263,14 @@ pub fn can_enroll(samples: &[VoiceSample]) -> bool {
 }
 
 pub fn matches(samples: &[VoiceSample], profiles: &[VoiceProfile]) -> Vec<NameMatch> {
+    matches_with_options(samples, profiles, false)
+}
+
+pub fn matches_with_options(
+    samples: &[VoiceSample],
+    profiles: &[VoiceProfile],
+    allow_cross_channel: bool,
+) -> Vec<NameMatch> {
     if samples.is_empty()
         || samples.iter().any(|s| {
             s.model != VOICE_MODEL || !s.range.is_valid() || normalized(&s.vector).is_none()
@@ -250,8 +283,9 @@ pub fn matches(samples: &[VoiceSample], profiles: &[VoiceProfile]) -> Vec<NameMa
         return Vec::new();
     }
     if domain == AttributionSource::System {
-        return call_matches(samples, profiles);
+        return call_matches(samples, profiles, allow_cross_channel);
     }
+    let query = sample_voiceprint(samples);
     let mut scored: Vec<(&VoiceProfile, f64, f64)> = Vec::new();
     for profile in profiles.iter().filter(|p| p.model == VOICE_MODEL) {
         let exemplars: Vec<&VoiceSample> = profile
@@ -264,36 +298,49 @@ pub fn matches(samples: &[VoiceSample], profiles: &[VoiceProfile]) -> Vec<NameMa
                     && s.resolved_source() == domain
             })
             .collect();
-        if exemplars.len() < 3 {
-            continue;
+        if exemplars.len() >= 2 {
+            let scores: Vec<f64> = samples
+                .iter()
+                .map(|sample| {
+                    exemplars
+                        .iter()
+                        .map(|e| cosine(&sample.vector, &e.vector))
+                        .fold(-1.0, f64::max)
+                })
+                .collect();
+            let mean = scores.iter().sum::<f64>() / scores.len() as f64;
+            let minimum = scores.iter().copied().fold(f64::INFINITY, f64::min);
+            if mean >= 0.48 && minimum >= 0.40 {
+                scored.push((profile, mean, mean));
+            }
+        } else if allow_cross_channel
+            && exemplars.is_empty()
+            && let Some(fallback) = call_voiceprint(profile)
+            && let Some(query) = query.as_ref()
+        {
+            let score = cosine(&query.vector, &fallback.vector);
+            if score >= call::CROSS_CHANNEL_SUGGESTED_SCORE {
+                scored.push((profile, score, score - 0.05));
+            }
         }
-        let scores: Vec<f64> = samples
-            .iter()
-            .map(|sample| {
-                exemplars
-                    .iter()
-                    .map(|e| cosine(&sample.vector, &e.vector))
-                    .fold(-1.0, f64::max)
-            })
-            .collect();
-        let mean = scores.iter().sum::<f64>() / scores.len() as f64;
-        let minimum = scores.iter().copied().fold(f64::INFINITY, f64::min);
-        scored.push((profile, mean, minimum));
     }
-    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+    scored.sort_by(|a, b| b.2.total_cmp(&a.2));
     let seconds: f64 = samples.iter().map(|s| s.range.duration()).sum();
     scored
         .into_iter()
         .take(3)
-        .filter(|(_, mean, minimum)| *mean >= 0.72 && *minimum >= 0.65)
-        .map(|(profile, mean, _)| {
-            name_match(profile, samples, MatchTier::Suggested, seconds, mean, None)
+        .map(|(profile, score, _)| {
+            name_match(profile, samples, MatchTier::Suggested, seconds, score, None)
         })
         .collect()
 }
 
-fn call_matches(samples: &[VoiceSample], profiles: &[VoiceProfile]) -> Vec<NameMatch> {
-    if samples.len() < 2 {
+fn call_matches(
+    samples: &[VoiceSample],
+    profiles: &[VoiceProfile],
+    allow_cross_channel: bool,
+) -> Vec<NameMatch> {
+    if samples.is_empty() {
         return Vec::new();
     }
     let Some(query) =
@@ -301,28 +348,39 @@ fn call_matches(samples: &[VoiceSample], profiles: &[VoiceProfile]) -> Vec<NameM
     else {
         return Vec::new();
     };
-    let mut scored: Vec<(&VoiceProfile, f64)> = profiles
+    let mut scored: Vec<(&VoiceProfile, f64, f64, bool)> = profiles
         .iter()
         .filter_map(|profile| {
-            let remembered = call_voiceprint(profile)?;
-            Some((profile, cosine(&query.vector, &remembered.vector)))
+            if let Some(remembered) = call_voiceprint(profile) {
+                let score = cosine(&query.vector, &remembered.vector);
+                (score >= call::SUGGESTED_SCORE).then_some((profile, score, score, false))
+            } else if allow_cross_channel
+                && let Some(fallback) = mic_voiceprint(profile)
+            {
+                let score = cosine(&query.vector, &fallback.vector);
+                (score >= call::CROSS_CHANNEL_SUGGESTED_SCORE)
+                    .then_some((profile, score, score - 0.05, true))
+            } else {
+                None
+            }
         })
         .collect();
-    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+    scored.sort_by(|a, b| b.2.total_cmp(&a.2));
     let seconds: f64 = samples.iter().map(|s| s.range.duration()).sum();
     scored
         .iter()
         .take(3)
-        .filter(|(_, score)| *score >= call::SUGGESTED_SCORE)
-        .map(|(profile, score)| {
+        .map(|(profile, score, _, is_cross_channel)| {
             let name = name_key(&profile.name);
             let next = scored
                 .iter()
-                .filter(|(other, _)| name_key(&other.name) != name)
-                .map(|(_, score)| *score)
+                .filter(|(other, _, _, _)| name_key(&other.name) != name)
+                .map(|(_, score, _, _)| *score)
                 .fold(-1.0, f64::max);
-            let automatic = samples.len() >= 3
+            let automatic = !*is_cross_channel
+                && samples.len() >= 3
                 && seconds >= 15.0
+                && query.consistency >= call::MINIMUM_CONSISTENCY
                 && *score >= call::AUTOMATIC_SCORE
                 && *score - next >= call::AUTOMATIC_MARGIN;
             name_match(

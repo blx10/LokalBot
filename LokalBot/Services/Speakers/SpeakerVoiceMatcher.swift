@@ -4,7 +4,10 @@ enum SpeakerVoiceMatcher {
     enum Call {
         static let sampleLimit = 16
         static let minimumConsistency = 0.75
-        static let suggestedScore = 0.60
+        static let minimumEnrollmentChunks = 2
+        static let minimumEnrollmentSeconds = 8.0
+        static let suggestedScore = 0.45
+        static let crossChannelSuggestedScore = 0.50
         static let automaticScore = 0.70
         static let automaticMargin = 0.15
         static let policyVersion = "call-voiceprint-1"
@@ -54,6 +57,16 @@ enum SpeakerVoiceMatcher {
         return voiceprint(meetings)
     }
 
+    static func micVoiceprint(_ profile: SpeakerVoiceProfile) -> Voiceprint? {
+        guard profile.model == SpeakerVoiceSample.fingerprint else { return nil }
+        let vectors = profile.contributions.flatMap(\.samples).filter {
+            $0.model == SpeakerVoiceSample.fingerprint && normalized($0.vector) != nil
+                && ($0.source ?? .system) == .microphone
+        }.map(\.vector)
+        guard !vectors.isEmpty else { return nil }
+        return voiceprint(vectors)
+    }
+
     static func eligible(_ samples: [SpeakerVoiceSample], turns: [SpeakerAudioTurn], speaker: String) -> [SpeakerVoiceSample] {
         if turns.first(where: { $0.speaker == speaker })?.resolvedSource == .system {
             return callEligible(samples, turns: turns, speaker: speaker)
@@ -80,7 +93,7 @@ enum SpeakerVoiceMatcher {
             }
             if selected.count == 8 { break }
         }
-        guard selected.allSatisfy({ a in selected.allSatisfy { cosine(a.vector, $0.vector) >= 0.75 } }) else { return [] }
+        guard selected.allSatisfy({ a in selected.allSatisfy { cosine(a.vector, $0.vector) >= Call.minimumConsistency } }) else { return [] }
         return selected
     }
 
@@ -103,61 +116,85 @@ enum SpeakerVoiceMatcher {
 
     static func canEnroll(_ samples: [SpeakerVoiceSample]) -> Bool {
         let call = samples.first.map { ($0.source ?? .system) == .system } ?? false
-        guard samples.count >= 3, samples.count <= (call ? Call.sampleLimit : 8),
+        guard samples.count >= Call.minimumEnrollmentChunks, samples.count <= (call ? Call.sampleLimit : 8),
               samples.allSatisfy({ $0.model == SpeakerVoiceSample.fingerprint && $0.range.isValid && normalized($0.vector) != nil }),
               Set(samples.map(\.speaker)).count == 1,
               Set(samples.map { $0.source ?? .system }).count == 1,
-              samples.reduce(0, { $0 + $1.range.duration }) >= 15 else { return false }
+              samples.reduce(0, { $0 + $1.range.duration }) >= Call.minimumEnrollmentSeconds else { return false }
         for index in samples.indices {
             for other in samples.indices where other > index {
                 if samples[index].range.overlap(samples[other].range) > 0
-                    || (!call && cosine(samples[index].vector, samples[other].vector) < 0.75) { return false }
+                    || (!call && cosine(samples[index].vector, samples[other].vector) < Call.minimumConsistency) { return false }
             }
         }
         return !call || (voiceprint(samples)?.consistency ?? 0) >= Call.minimumConsistency
     }
 
-    static func matches(samples: [SpeakerVoiceSample], profiles: [SpeakerVoiceProfile]) -> [SpeakerNameMatch] {
+    static func matches(samples: [SpeakerVoiceSample], profiles: [SpeakerVoiceProfile],
+                        allowCrossChannel: Bool = false) -> [SpeakerNameMatch] {
         guard !samples.isEmpty,
               samples.allSatisfy({ $0.model == SpeakerVoiceSample.fingerprint && $0.range.isValid && normalized($0.vector) != nil }) else { return [] }
         let domain = samples[0].source ?? .system
         guard samples.allSatisfy({ ($0.source ?? .system) == domain }) else { return [] }
-        if domain == .system { return callMatches(samples: samples, profiles: profiles) }
-        var scored: [(SpeakerVoiceProfile, Double, Double)] = []
+        if domain == .system { return callMatches(samples: samples, profiles: profiles, allowCrossChannel: allowCrossChannel) }
+        var scored: [(profile: SpeakerVoiceProfile, score: Double, rankScore: Double)] = []
+        let query = voiceprint(samples)
         for profile in profiles where profile.model == SpeakerVoiceSample.fingerprint {
             let exemplars = profile.contributions.flatMap(\.samples).filter {
                 $0.model == SpeakerVoiceSample.fingerprint && normalized($0.vector) != nil
                     && ($0.source ?? .system) == domain
             }
-            guard exemplars.count >= 3 else { continue }
-            let scores = samples.map { sample in
-                exemplars.map { cosine(sample.vector, $0.vector) }.max() ?? -1
+            if exemplars.count >= 2 {
+                let scores = samples.map { sample in
+                    exemplars.map { cosine(sample.vector, $0.vector) }.max() ?? -1
+                }
+                let mean = scores.reduce(0, +) / Double(scores.count)
+                let minimum = scores.min() ?? -1
+                if mean >= 0.48, minimum >= 0.40 {
+                    scored.append((profile, mean, mean))
+                }
+            } else if allowCrossChannel, exemplars.isEmpty, let fallback = callVoiceprint(profile), let query {
+                let score = cosine(query.vector, fallback.vector)
+                if score >= Call.crossChannelSuggestedScore {
+                    scored.append((profile, score, score - 0.05))
+                }
             }
-            scored.append((profile, scores.reduce(0, +) / Double(scores.count), scores.min() ?? -1))
         }
-        scored.sort { $0.1 > $1.1 }
-        return Array(scored.prefix(3)).compactMap { profile, mean, minimum in
-            guard mean >= 0.72, minimum >= 0.65 else { return nil }
-            return SpeakerNameMatch(name: profile.name, participantReference: profile.id.uuidString,
+        scored.sort { $0.rankScore > $1.rankScore }
+        return Array(scored.prefix(3)).map { entry in
+            SpeakerNameMatch(name: entry.profile.name, participantReference: entry.profile.id.uuidString,
                 tier: .suggested, source: .profile,
                 supportSeconds: samples.reduce(0) { $0 + $1.range.duration }, independentTurns: samples.count,
-                supportFraction: mean, contradictionSeconds: 0, evidence: Array(samples.map(\.range).prefix(8)),
-                profileID: profile.id, profileRevision: profile.revision)
+                supportFraction: entry.score, contradictionSeconds: 0, evidence: Array(samples.map(\.range).prefix(8)),
+                profileID: entry.profile.id, profileRevision: entry.profile.revision)
         }
     }
 
-    private static func callMatches(samples: [SpeakerVoiceSample], profiles: [SpeakerVoiceProfile]) -> [SpeakerNameMatch] {
-        guard samples.count >= 2, let query = voiceprint(samples), query.consistency >= Call.minimumConsistency else { return [] }
-        let scored = profiles.compactMap { profile -> (SpeakerVoiceProfile, Double)? in
-            guard let remembered = callVoiceprint(profile) else { return nil }
-            return (profile, cosine(query.vector, remembered.vector))
-        }.sorted { $0.1 > $1.1 }
+    private static func callMatches(samples: [SpeakerVoiceSample], profiles: [SpeakerVoiceProfile],
+                                    allowCrossChannel: Bool = false) -> [SpeakerNameMatch] {
+        guard samples.count >= 1, let query = voiceprint(samples),
+              query.consistency >= Call.minimumConsistency else { return [] }
+        let scored = profiles.compactMap { profile -> (profile: SpeakerVoiceProfile, score: Double, rankScore: Double, isCrossChannel: Bool)? in
+            if let remembered = callVoiceprint(profile) {
+                let score = cosine(query.vector, remembered.vector)
+                guard score >= Call.suggestedScore else { return nil }
+                return (profile, score, score, false)
+            }
+            if allowCrossChannel, let fallback = micVoiceprint(profile) {
+                let score = cosine(query.vector, fallback.vector)
+                guard score >= Call.crossChannelSuggestedScore else { return nil }
+                return (profile, score, score - 0.05, true)
+            }
+            return nil
+        }.sorted { $0.rankScore > $1.rankScore }
         let seconds = samples.reduce(0) { $0 + $1.range.duration }
-        return Array(scored.prefix(3)).compactMap { profile, score in
-            guard score >= Call.suggestedScore else { return nil }
+        return Array(scored.prefix(3)).map { entry in
+            let profile = entry.profile
+            let score = entry.score
             let name = ParticipantObservation.nameKey(profile.name)
-            let next = scored.filter { ParticipantObservation.nameKey($0.0.name) != name }.map(\.1).max() ?? -1
-            let automatic = samples.count >= 3 && seconds >= 15
+            let next = scored.filter { ParticipantObservation.nameKey($0.profile.name) != name }.map(\.score).max() ?? -1
+            let automatic = !entry.isCrossChannel && samples.count >= 3 && seconds >= 15
+                && query.consistency >= Call.minimumConsistency
                 && score >= Call.automaticScore && score - next >= Call.automaticMargin
             var match = SpeakerNameMatch(name: profile.name, participantReference: profile.id.uuidString,
                 tier: automatic ? .automatic : .suggested, source: .profile,

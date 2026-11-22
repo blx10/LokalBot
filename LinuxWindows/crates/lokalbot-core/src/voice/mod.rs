@@ -22,12 +22,13 @@ use crate::time::swift_date;
 
 pub use evidence::{MicrophoneEvidence, label_samples, label_turns, select_microphone_samples};
 pub use matcher::{
-    Voiceprint, call, can_enroll, cosine, eligible, matches, normalized, voiceprint,
+    Voiceprint, call, can_enroll, cosine, eligible, matches, matches_with_options, normalized,
+    voiceprint,
 };
 pub use resolver::{apply as apply_candidates, remap};
 pub use service::{
     Choice, ChooseError, ProcessRequest, Revisit, SavedMeetingAccess, VoiceMemory, audio_revision,
-    recognized_speakers, recording_revision, same_person, summary_needs_refresh,
+    live_suggestions, recognized_speakers, recording_revision, same_person, summary_needs_refresh,
     transcript_signature,
 };
 pub use store::{Failure, Store};

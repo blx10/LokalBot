@@ -16,7 +16,7 @@ use super::evidence::MicrophoneEvidence;
 use super::{
     Assignment, AudioTurn, CALL_VOICES_VERSION, Decision, DecisionAction, Failure, IdentityState,
     MatchTier, NameMatch, Origin, Store, TurnAnchor, VoiceProfile, VoiceSample, apply_candidates,
-    can_enroll, eligible, legacy_source, matches, name_key, remap, union,
+    can_enroll, eligible, legacy_source, matches, matches_with_options, name_key, remap, union,
 };
 
 pub fn audio_revision(path: &Path) -> std::io::Result<String> {
@@ -187,6 +187,9 @@ pub fn same_person(name: &str, samples: &[VoiceSample], profiles: &[VoiceProfile
     if let Some(agreeing) = matches(samples, &named).first().and_then(|m| m.profile_id) {
         return Some(agreeing);
     }
+    if named.len() == 1 {
+        return Some(named[0].id);
+    }
     let domain = samples
         .first()
         .map_or(AttributionSource::System, VoiceSample::resolved_source);
@@ -200,7 +203,58 @@ pub fn same_person(name: &str, samples: &[VoiceSample], profiles: &[VoiceProfile
                     == domain
             })
         })
+        .or_else(|| named.first())
         .map(|p| p.id)
+}
+
+pub fn live_suggestions(
+    state: Option<&IdentityState>,
+    transcript: Option<&Transcript>,
+    profiles: &[VoiceProfile],
+) -> BTreeMap<String, Vec<NameMatch>> {
+    let (Some(state), Some(transcript)) = (state, transcript) else {
+        return BTreeMap::new();
+    };
+    let labels: HashSet<String> = transcript
+        .segments
+        .iter()
+        .map(|s| Transcript::canonical_speaker_key(&s.speaker))
+        .collect();
+    let turns = if state.timeline.is_empty() {
+        state.acoustic_timeline.as_deref().unwrap_or(&[])
+    } else {
+        state.timeline.as_slice()
+    };
+    let mut result = BTreeMap::new();
+    for label in labels {
+        let assignment = state.assignment(&label);
+        if assignment.is_some_and(|a| a.origin.is_protected() || a.automatic_disabled) {
+            continue;
+        }
+        let suppressed: HashSet<String> = assignment
+            .map(|a| a.suppressed_names.iter().cloned().collect())
+            .unwrap_or_default();
+        let samples = eligible(&state.voice_samples, turns, &label);
+        let fresh: Vec<NameMatch> = matches_with_options(&samples, profiles, true)
+            .into_iter()
+            .filter(|m| !suppressed.contains(&name_key(&m.name)))
+            .take(3)
+            .collect();
+        if !fresh.is_empty() {
+            result.insert(label, fresh);
+        } else if let Some(existing) = state.suggestions.get(&label) {
+            let kept: Vec<NameMatch> = existing
+                .iter()
+                .filter(|m| !suppressed.contains(&name_key(&m.name)))
+                .take(3)
+                .cloned()
+                .collect();
+            if !kept.is_empty() {
+                result.insert(label, kept);
+            }
+        }
+    }
+    result
 }
 
 pub fn summary_needs_refresh(
@@ -526,9 +580,10 @@ impl VoiceMemory {
                 };
                 next.assignments[index].source = speaker_turns.first().map(|t| t.resolved_source());
                 let candidates = if remembered {
-                    matches(
+                    matches_with_options(
                         &eligible(&next.voice_samples, &usable, label),
                         &database.profiles,
+                        true,
                     )
                 } else {
                     Vec::new()
@@ -840,7 +895,7 @@ impl VoiceMemory {
                 self.set_notice(
                     meeting.id,
                     Some(
-                        "Name saved. Remembering this voice needs three separate clear turns totaling 15 seconds."
+                        "Name saved. Remembering this voice needs two separate clear turns totaling 8 seconds."
                             .into(),
                     ),
                 );

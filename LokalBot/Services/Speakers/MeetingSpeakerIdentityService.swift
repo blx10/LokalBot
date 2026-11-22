@@ -161,7 +161,7 @@ final class MeetingSpeakerIdentityService: ObservableObject {
                     var candidates: [SpeakerNameMatch] = []
                     if remembered {
                         let eligible = SpeakerVoiceMatcher.eligible(next.voiceSamples, turns: usableTurns, speaker: label)
-                        candidates += SpeakerVoiceMatcher.matches(samples: eligible, profiles: database.profiles)
+                        candidates += SpeakerVoiceMatcher.matches(samples: eligible, profiles: database.profiles, allowCrossChannel: true)
                     }
                     if nameAutomatically {
                         next.suggestions[label] = SpeakerIdentityResolver.apply(candidates: candidates, to: &next.assignments[index], profiles: database.profiles)
@@ -338,7 +338,7 @@ final class MeetingSpeakerIdentityService: ObservableObject {
                         samples: samples, profileID: target, expectedDatabaseRevision: database.revision)
                 } catch { notice = "Name saved. Voice profile update pending: \(error.localizedDescription)" }
             } else if !samples.isEmpty || assignment.source == .microphone {
-                notice = "Name saved. Remembering this voice needs three separate clear turns totaling 15 seconds."
+                notice = "Name saved. Remembering this voice needs two separate clear turns totaling 8 seconds."
             }
         }
         revision += 1
@@ -393,10 +393,39 @@ final class MeetingSpeakerIdentityService: ObservableObject {
             ([profile.name] + profile.confirmedNames).contains { ParticipantObservation.nameKey($0) == key }
         }
         if let agreeing = SpeakerVoiceMatcher.matches(samples: samples, profiles: named).first?.profileID { return agreeing }
+        if named.count == 1 { return named[0].id }
         let domain = samples.first?.source ?? .system
         return named.first { profile in
             !profile.contributions.contains { ($0.samples.first?.source ?? .system) == domain }
-        }?.id
+        }?.id ?? named.first?.id
+    }
+
+    static func liveSuggestions(
+        for state: MeetingSpeakerIdentityState?,
+        transcript: Transcript?,
+        profiles: [SpeakerVoiceProfile]
+    ) -> [String: [SpeakerNameMatch]] {
+        guard let state, let transcript else { return [:] }
+        let labels = Set(transcript.segments.map { Transcript.canonicalSpeakerKey($0.speaker) })
+        let turns = state.timeline.isEmpty ? (state.acousticTimeline ?? []) : state.timeline
+        var result: [String: [SpeakerNameMatch]] = [:]
+        for label in labels {
+            let assignment = state.assignments.first { $0.label == label }
+            if assignment?.origin.isProtected == true || assignment?.automaticDisabled == true {
+                continue
+            }
+            let suppressed = Set(assignment?.suppressedNames ?? [])
+            let eligible = SpeakerVoiceMatcher.eligible(state.voiceSamples, turns: turns, speaker: label)
+            let fresh = SpeakerVoiceMatcher.matches(samples: eligible, profiles: profiles, allowCrossChannel: true)
+                .filter { !suppressed.contains(ParticipantObservation.nameKey($0.name)) }
+            if !fresh.isEmpty {
+                result[label] = Array(fresh.prefix(3))
+            } else if let existing = state.suggestions[label]?.filter({ !suppressed.contains(ParticipantObservation.nameKey($0.name)) }),
+                      !existing.isEmpty {
+                result[label] = Array(existing.prefix(3))
+            }
+        }
+        return result
     }
 
     struct SavedMeetings {

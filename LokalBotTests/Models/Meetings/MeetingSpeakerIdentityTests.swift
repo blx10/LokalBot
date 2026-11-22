@@ -213,4 +213,47 @@ final class SpeakerVoiceMatcherTests: XCTestCase {
         }
         XCTAssertTrue(SpeakerVoiceMatcher.eligible(query, turns: turns, speaker: "them").isEmpty)
     }
+    func testRelaxedEnrollmentAndSuggestedThresholdsKeepAutomaticStrict() {
+        let twoTurns = [
+            SpeakerVoiceSample(speaker: "them", range: .init(start: 0, end: 4), vector: vector(0), source: .system),
+            SpeakerVoiceSample(speaker: "them", range: .init(start: 10, end: 14), vector: vector(0), source: .system),
+        ]
+        XCTAssertTrue(SpeakerVoiceMatcher.canEnroll(twoTurns))
+        let tooShort = [
+            SpeakerVoiceSample(speaker: "them", range: .init(start: 0, end: 3.5), vector: vector(0), source: .system),
+            SpeakerVoiceSample(speaker: "them", range: .init(start: 10, end: 13.5), vector: vector(0), source: .system),
+        ]
+        XCTAssertFalse(SpeakerVoiceMatcher.canEnroll(tooShort))
+
+        let singleSample = [twoTurns[0]]
+        let singleMatch = SpeakerVoiceMatcher.matches(samples: singleSample, profiles: [profile(axis: 0)])
+        XCTAssertEqual(singleMatch.first?.tier, .suggested)
+
+        var borderline = [Float](repeating: 0, count: 256)
+        borderline[0] = 0.50
+        borderline[1] = 0.8660254
+        let mildSamples = (0..<4).map { index in
+            SpeakerVoiceSample(speaker: "them", range: .init(start: Double(index * 10), end: Double(index * 10 + 5)),
+                               vector: borderline, source: .system)
+        }
+        let mildMatch = SpeakerVoiceMatcher.matches(samples: mildSamples, profiles: [profile(axis: 0)])
+        XCTAssertEqual(mildMatch.first?.tier, .suggested)
+        XCTAssertEqual(mildMatch.first?.supportFraction ?? 0, 0.50, accuracy: 0.01)
+    }
+    func testCrossChannelFallbackProducesSuggestionsOnlyWhenEnabled() {
+        var microphone = profile(axis: 0)
+        for index in microphone.contributions[0].samples.indices {
+            microphone.contributions[0].samples[index].source = .microphone
+        }
+        let callMatch = SpeakerVoiceMatcher.matches(samples: samples(axis: 0), profiles: [microphone], allowCrossChannel: true)
+        XCTAssertEqual(callMatch.first?.tier, .suggested)
+        XCTAssertEqual(callMatch.first?.name, "Alex")
+
+        let micQuery = samples(axis: 0).map { sample -> SpeakerVoiceSample in
+            var copy = sample; copy.source = .microphone; return copy
+        }
+        let micMatch = SpeakerVoiceMatcher.matches(samples: micQuery, profiles: [profile(axis: 0)], allowCrossChannel: true)
+        XCTAssertEqual(micMatch.first?.tier, .suggested)
+        XCTAssertEqual(micMatch.first?.name, "Alex")
+    }
 }
