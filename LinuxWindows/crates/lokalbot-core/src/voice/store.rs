@@ -553,6 +553,55 @@ impl Store {
         self.write(&database, PROFILES_FILE)
     }
 
+    pub fn merge_profiles(&self, source_id: Uuid, target_id: Uuid) -> Result<(), Failure> {
+        if source_id == target_id {
+            return Err(Failure::Stale);
+        }
+        let _guard = self.lock.lock();
+        let mut database = self.profiles_inner()?;
+        let Some(source_ix) = database.profiles.iter().position(|p| p.id == source_id) else {
+            return Err(Failure::Stale);
+        };
+        let Some(target_ix) = database.profiles.iter().position(|p| p.id == target_id) else {
+            return Err(Failure::Stale);
+        };
+        let source = database.profiles[source_ix].clone();
+        if source.model != database.profiles[target_ix].model {
+            return Err(Failure::Stale);
+        }
+        if let (Some(a), Some(b)) = (source.is_local_user, database.profiles[target_ix].is_local_user)
+            && a != b
+        {
+            return Err(Failure::Stale);
+        }
+        let target = &mut database.profiles[target_ix];
+        if target.is_local_user.is_none() {
+            target.is_local_user = source.is_local_user;
+        }
+        for item in source.contributions {
+            if !target.contributions.iter().any(|existing| {
+                existing.meeting_id == item.meeting_id && existing.speaker_id == item.speaker_id
+            }) {
+                target.contributions.push(item);
+            }
+        }
+        target.contributions.sort_by_key(|c| c.confirmed_at);
+        if target.contributions.len() > MAXIMUM_CONTRIBUTIONS {
+            let extra = target.contributions.len() - MAXIMUM_CONTRIBUTIONS;
+            target.contributions.drain(..extra);
+        }
+        for candidate in std::iter::once(source.name).chain(source.confirmed_names) {
+            if !target.confirmed_names.iter().any(|n| n == &candidate) {
+                target.confirmed_names.push(candidate);
+            }
+        }
+        target.revision += 1;
+        database.profiles.retain(|p| p.id != source_id);
+        database.forgotten_profiles.insert(source_id);
+        database.revision += 1;
+        self.write(&database, PROFILES_FILE)
+    }
+
     pub(super) fn safe_name(&self, raw: &str) -> Option<String> {
         super::safe_name(raw, &self.has_secret)
     }

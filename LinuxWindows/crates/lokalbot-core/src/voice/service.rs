@@ -984,6 +984,10 @@ impl VoiceMemory {
         self.store()?.rename_profile(id, name)
     }
 
+    pub fn merge_profiles(&self, source_id: Uuid, target_id: Uuid) -> Result<(), Failure> {
+        self.store()?.merge_profiles(source_id, target_id)
+    }
+
     fn has_saved_call_names(
         &self,
         saved: &IdentityState,

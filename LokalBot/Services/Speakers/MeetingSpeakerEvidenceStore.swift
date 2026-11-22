@@ -259,4 +259,38 @@ actor MeetingSpeakerEvidenceStore {
         database.revision += 1
         try write(database, at: profilesURL)
     }
+
+    func mergeProfiles(sourceID: UUID, into targetID: UUID) throws {
+        guard sourceID != targetID else { throw Failure.stale }
+        var database = try profiles()
+        guard let sourceIndex = database.profiles.firstIndex(where: { $0.id == sourceID }),
+              let targetIndex = database.profiles.firstIndex(where: { $0.id == targetID }) else { throw Failure.stale }
+        let source = database.profiles[sourceIndex]
+        let target = database.profiles[targetIndex]
+        guard source.model == target.model else { throw Failure.stale }
+        if let sourceUser = source.isLocalUser, let targetUser = target.isLocalUser, sourceUser != targetUser {
+            throw Failure.stale
+        }
+        if database.profiles[targetIndex].isLocalUser == nil {
+            database.profiles[targetIndex].isLocalUser = source.isLocalUser
+        }
+        var combined = database.profiles[targetIndex].contributions
+        for item in source.contributions where !combined.contains(where: {
+            $0.meetingID == item.meetingID && $0.speakerID == item.speakerID
+        }) {
+            combined.append(item)
+        }
+        combined.sort { $0.confirmedAt < $1.confirmedAt }
+        database.profiles[targetIndex].contributions = Array(combined.suffix(8))
+        for candidate in [source.name] + source.confirmedNames {
+            if !database.profiles[targetIndex].confirmedNames.contains(candidate) {
+                database.profiles[targetIndex].confirmedNames.append(candidate)
+            }
+        }
+        database.profiles[targetIndex].revision += 1
+        database.profiles.removeAll { $0.id == sourceID }
+        database.forgottenProfiles.insert(sourceID)
+        database.revision += 1
+        try write(database, at: profilesURL)
+    }
 }

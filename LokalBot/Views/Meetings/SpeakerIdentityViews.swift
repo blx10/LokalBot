@@ -12,18 +12,32 @@ struct SpeakerIdentitySettingsControls: View {
         }
         Button("Manage remembered people…") { managingProfiles = true }
             .sheet(isPresented: $managingProfiles) {
-                SpeakerVoiceProfileManager(identity: app.speakerIdentity)
+                SpeakerVoiceProfileManager(
+                    identity: app.speakerIdentity,
+                    meetings: app.meetings,
+                    storage: app.storage
+                )
             }
     }
 }
 
 private struct SpeakerVoiceProfileManager: View {
     @ObservedObject var identity: MeetingSpeakerIdentityService
+    let meetings: [Meeting]
+    let storage: StorageManager
     @Environment(\.dismiss) private var dismiss
+    @StateObject private var previewPlayer = MeetingPlayer()
     @State private var people: [SpeakerVoiceProfile] = []
     @State private var error: String?
     @State private var busy = false
     @State private var confirmingClearAll = false
+    @State private var playingContributionID: UUID?
+    @State private var playingMeetingID: UUID?
+    @State private var loadingPreview = false
+
+    private var meetingsByID: [UUID: Meeting] {
+        Dictionary(meetings.map { ($0.id, $0) }, uniquingKeysWith: { existing, _ in existing })
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -37,31 +51,107 @@ private struct SpeakerVoiceProfileManager: View {
             ScrollView {
                 VStack(spacing: 12) {
                     ForEach(people) { person in
-                        SpeakerVoiceProfileRow(person: person) { name in
-                            perform { try await identity.renameProfile(person.id, name: name) }
-                        } onForget: {
-                            perform { try await identity.forgetProfile(person.id) }
-                        }
+                        let mergeTargets = compatibleTargets(for: person)
+                        SpeakerVoiceProfileRow(
+                            person: person,
+                            mergeTargets: mergeTargets,
+                            meetingsByID: meetingsByID,
+                            storage: storage,
+                            playingContributionID: playingContributionID,
+                            onRename: { name in
+                                perform { try await identity.renameProfile(person.id, name: name) }
+                            },
+                            onForget: {
+                                stopPreview()
+                                perform { try await identity.forgetProfile(person.id) }
+                            },
+                            onMergeInto: { targetID in
+                                stopPreview()
+                                perform { try await identity.mergeProfiles(sourceID: person.id, into: targetID) }
+                            },
+                            onTogglePreview: { contribution in
+                                togglePreview(contribution)
+                            }
+                        )
                     }
                 }
             }
-            .frame(maxHeight: 320)
+            .frame(maxHeight: 360)
             if let error { Text(error).font(.scaled(.caption)).foregroundStyle(.red) }
             HStack {
                 Button("Clear all", role: .destructive) { confirmingClearAll = true }
                     .disabled(people.isEmpty)
                     .confirmationDialog("Forget every remembered voice?", isPresented: $confirmingClearAll,
                                         titleVisibility: .visible) {
-                        Button("Clear all", role: .destructive) { perform { try await identity.forgetProfile(nil) } }
+                        Button("Clear all", role: .destructive) {
+                            stopPreview()
+                            perform { try await identity.forgetProfile(nil) }
+                        }
                         Button("Cancel", role: .cancel) {}
                     }
                 Spacer()
                 Button("Done") { dismiss() }.keyboardShortcut(.defaultAction)
             }
         }
-        .padding(24).frame(width: 520).disabled(busy)
+        .padding(24).frame(width: 560).disabled(busy)
         .task { await reload() }
+        .onChange(of: previewPlayer.isPlaying) { _, playing in
+            if !playing && !loadingPreview {
+                playingContributionID = nil
+            }
+        }
+        .onDisappear { stopPreview() }
     }
+
+    private func compatibleTargets(for source: SpeakerVoiceProfile) -> [SpeakerVoiceProfile] {
+        people.filter { candidate in
+            guard candidate.id != source.id, candidate.model == source.model else { return false }
+            if let s = source.isLocalUser, let t = candidate.isLocalUser, s != t { return false }
+            return true
+        }
+    }
+
+    private func stopPreview() {
+        previewPlayer.stop()
+        playingContributionID = nil
+        playingMeetingID = nil
+    }
+
+    private func togglePreview(_ contribution: SpeakerVoiceProfile.Contribution) {
+        if previewPlayer.isPlaying && playingContributionID == contribution.decisionID {
+            stopPreview()
+            return
+        }
+        guard let meeting = meetingsByID[contribution.meetingID],
+              let sampleRange = contribution.samples.first?.range else { return }
+        let folder = meeting.folderURL(in: storage)
+        guard !MeetingAudioAsset.playbackSources(folder: folder, hasSystemTrack: meeting.hasSystemTrack).isEmpty else { return }
+        let start = sampleRange.start
+        let desiredEnd = max(sampleRange.end, start + 6)
+        if playingMeetingID == meeting.id && previewPlayer.isLoaded {
+            playingContributionID = contribution.decisionID
+            let end = previewPlayer.duration > 0 ? min(previewPlayer.duration, desiredEnd) : desiredEnd
+            previewPlayer.playExcerpt(from: start, to: end)
+            return
+        }
+        loadingPreview = true
+        playingContributionID = contribution.decisionID
+        playingMeetingID = meeting.id
+        Task {
+            defer { loadingPreview = false }
+            await previewPlayer.loadInBackground(folder: folder, hasSystemTrack: meeting.hasSystemTrack)
+            guard previewPlayer.isLoaded, playingContributionID == contribution.decisionID else {
+                if !previewPlayer.isPlaying {
+                    playingContributionID = nil
+                    playingMeetingID = nil
+                }
+                return
+            }
+            let end = previewPlayer.duration > 0 ? min(previewPlayer.duration, desiredEnd) : desiredEnd
+            previewPlayer.playExcerpt(from: start, to: end)
+        }
+    }
+
     private func reload() async {
         do { people = try await identity.profiles() } catch { self.error = "Could not read remembered people: \(error.localizedDescription)" }
     }
@@ -76,22 +166,107 @@ private struct SpeakerVoiceProfileManager: View {
 
 private struct SpeakerVoiceProfileRow: View {
     let person: SpeakerVoiceProfile
+    let mergeTargets: [SpeakerVoiceProfile]
+    let meetingsByID: [UUID: Meeting]
+    let storage: StorageManager
+    let playingContributionID: UUID?
     let onRename: (String) -> Void
     let onForget: () -> Void
+    let onMergeInto: (UUID) -> Void
+    let onTogglePreview: (SpeakerVoiceProfile.Contribution) -> Void
     @State private var name: String
-    init(person: SpeakerVoiceProfile, onRename: @escaping (String) -> Void, onForget: @escaping () -> Void) {
-        self.person = person; self.onRename = onRename; self.onForget = onForget
+    @State private var showingSources = false
+
+    init(
+        person: SpeakerVoiceProfile,
+        mergeTargets: [SpeakerVoiceProfile],
+        meetingsByID: [UUID: Meeting],
+        storage: StorageManager,
+        playingContributionID: UUID?,
+        onRename: @escaping (String) -> Void,
+        onForget: @escaping () -> Void,
+        onMergeInto: @escaping (UUID) -> Void,
+        onTogglePreview: @escaping (SpeakerVoiceProfile.Contribution) -> Void
+    ) {
+        self.person = person
+        self.mergeTargets = mergeTargets
+        self.meetingsByID = meetingsByID
+        self.storage = storage
+        self.playingContributionID = playingContributionID
+        self.onRename = onRename
+        self.onForget = onForget
+        self.onMergeInto = onMergeInto
+        self.onTogglePreview = onTogglePreview
         _name = State(initialValue: person.name)
     }
+
+    private var sortedContributions: [SpeakerVoiceProfile.Contribution] {
+        person.contributions.sorted { $0.confirmedAt > $1.confirmedAt }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
                 TextField("Person's name", text: $name).textFieldStyle(.roundedBorder)
                 Button("Rename") { onRename(name) }.disabled(name == person.name || ParticipantObservation.safeName(name) == nil)
+                if !mergeTargets.isEmpty {
+                    Menu("Merge into…") {
+                        ForEach(mergeTargets) { target in
+                            Button(target.name) { onMergeInto(target.id) }
+                        }
+                    }
+                }
                 Button("Forget", role: .destructive, action: onForget)
             }
             Text("\(person.contributions.count) confirmed recording(s) · Profile \(person.id.uuidString.prefix(6))")
                 .font(.scaled(.caption)).foregroundStyle(.secondary)
+            if !person.contributions.isEmpty {
+                DisclosureGroup("Learned from \(person.contributions.count) meeting(s)", isExpanded: $showingSources) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(sortedContributions, id: \.decisionID) { contribution in
+                            contributionRow(contribution)
+                        }
+                    }
+                    .padding(.top, 4)
+                }
+                .font(.scaled(.caption))
+            }
+        }
+        .padding(10)
+        .lbGroupedSurface()
+    }
+
+    @ViewBuilder
+    private func contributionRow(_ contribution: SpeakerVoiceProfile.Contribution) -> some View {
+        let meeting = meetingsByID[contribution.meetingID]
+        let title = meeting?.displayTitle ?? contribution.meetingTitle ?? "Meeting"
+        let started = meeting?.startedAt ?? contribution.meetingStartedAt ?? contribution.confirmedAt
+        let hasAudio = meeting.map {
+            !MeetingAudioAsset.playbackSources(folder: $0.folderURL(in: storage), hasSystemTrack: $0.hasSystemTrack).isEmpty
+        } ?? false
+        let canPreview = hasAudio && contribution.samples.first?.range != nil
+        let isPlaying = playingContributionID == contribution.decisionID
+        HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.scaled(.caption).weight(.medium))
+                    .lineLimit(1)
+                Text(started.formatted(date: .abbreviated, time: .shortened))
+                    .font(.scaled(.caption2))
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            if canPreview {
+                Button(isPlaying ? "Stop" : "Play") {
+                    onTogglePreview(contribution)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.mini)
+            } else {
+                Text("Recording deleted")
+                    .font(.scaled(.caption2))
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 }

@@ -553,4 +553,8 @@ final class MeetingSpeakerIdentityService: ObservableObject {
     }
     func forgetProfile(_ id: UUID?) async throws { try await store().forgetProfile(id); revision += 1 }
     func renameProfile(_ id: UUID, name: String) async throws { try await store().renameProfile(id, name: name); revision += 1 }
+    func mergeProfiles(sourceID: UUID, into targetID: UUID) async throws {
+        try await store().mergeProfiles(sourceID: sourceID, into: targetID)
+        revision += 1
+    }
 }

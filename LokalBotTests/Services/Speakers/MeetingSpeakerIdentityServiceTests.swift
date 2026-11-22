@@ -469,6 +469,48 @@ import XCTest
         XCTAssertEqual(profiles.map(\.name), ["Hernan"])
     }
 
+    func testMergeProfilesCombinesContributionsAndRemovesSource() async throws {
+        let (first, firstAudio, firstTranscript, firstTurns, firstSamples) = try callFixture()
+        let firstProcessed = await service.process(
+            transcript: firstTranscript, meeting: first, turns: firstTurns, samples: firstSamples, audioURL: firstAudio
+        )
+        _ = try await service.choose(.init(label: "them 1", name: "Ada"), meeting: first, transcript: firstProcessed)
+
+        let second = try storage.createMeetingFolder(title: "Second call", appName: "Google Chrome")
+        let secondAudio = second.folderURL(in: storage).appendingPathComponent("system.m4a")
+        let writer = try WavWriter(url: secondAudio, sampleRate: 16_000)
+        try writer.append([Float](repeating: 0, count: 60 * 16_000)); try writer.finish()
+        let secondSegments: [Transcript.Segment] = (0..<4).map { index in
+            let start = Double(index * 14 + 1)
+            return .init(start: start, end: start + 10, speaker: "them 1", text: "Second call turn",
+                         attribution: .init(source: .system, identity: .other, method: .diarization))
+        }
+        let secondTranscript = Transcript(segments: secondSegments, engine: "fixture")
+        let secondTurns = secondSegments.map { SpeakerAudioTurn(speaker: $0.speaker, range: .init(start: $0.start, end: $0.end), source: .system) }
+        var secondVector = [Float](repeating: 0, count: 256); secondVector[5] = 1
+        let secondSamples = secondTurns.map { SpeakerVoiceSample(speaker: "them 1", range: $0.range, vector: secondVector, source: .system) }
+        let secondProcessed = await service.process(
+            transcript: secondTranscript, meeting: second, turns: secondTurns, samples: secondSamples, audioURL: secondAudio
+        )
+        _ = try await service.choose(.init(label: "them 1", name: "Ada Alt"), meeting: second, transcript: secondProcessed)
+
+        let before = try await service.profiles()
+        XCTAssertEqual(before.count, 2)
+        guard let target = before.first(where: { $0.name == "Ada" }),
+              let source = before.first(where: { $0.name == "Ada Alt" }) else {
+            return XCTFail("Expected both profiles to exist before merge")
+        }
+
+        try await service.mergeProfiles(sourceID: source.id, into: target.id)
+        let after = try await service.profiles()
+        XCTAssertEqual(after.count, 1)
+        XCTAssertEqual(after[0].id, target.id)
+        XCTAssertEqual(after[0].name, "Ada")
+        XCTAssertEqual(after[0].contributions.count, 2)
+        XCTAssertTrue(after[0].confirmedNames.contains("Ada"))
+        XCTAssertTrue(after[0].confirmedNames.contains("Ada Alt"))
+    }
+
     @MainActor private final class SavedLibrary {
         struct Unavailable: Error {}
         let transcripts: [UUID: Transcript]

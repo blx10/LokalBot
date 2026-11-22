@@ -985,3 +985,116 @@ fn relaxed_suggestions_cross_channel_same_person_and_live_suggestions() {
     let live = live_suggestions(Some(&old_state), Some(&old_transcript), &profiles);
     assert_eq!(live["them 1"][0].name, "Alper");
 }
+
+#[test]
+fn merge_profiles_combines_contributions_and_rejects_mismatched_local_user() {
+    let (_dir, library) = library();
+    let memory = memory(&library);
+    let first = meeting(&library);
+    let first_saved = process(
+        &memory,
+        &first,
+        &call_transcript("them 1"),
+        call_samples("them 1", 3),
+    );
+    memory
+        .choose(
+            &Choice::new("them 1", Some("Ada".into()), DecisionAction::Assign),
+            &first,
+            &first_saved,
+        )
+        .unwrap();
+
+    let second = meeting(&library);
+    let second_saved = process(
+        &memory,
+        &second,
+        &call_transcript("them 1"),
+        call_samples("them 1", 12),
+    );
+    memory
+        .choose(
+            &Choice::new("them 1", Some("Ada Alt".into()), DecisionAction::Assign),
+            &second,
+            &second_saved,
+        )
+        .unwrap();
+
+    let profiles = memory.profiles().unwrap();
+    assert_eq!(profiles.len(), 2);
+    let target = profiles.iter().find(|p| p.name == "Ada").unwrap();
+    let source = profiles.iter().find(|p| p.name == "Ada Alt").unwrap();
+
+    memory.merge_profiles(source.id, target.id).unwrap();
+    let after = memory.profiles().unwrap();
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].id, target.id);
+    assert_eq!(after[0].name, "Ada");
+    assert_eq!(after[0].contributions.len(), 2);
+    assert!(after[0].confirmed_names.contains(&"Ada".to_string()));
+    assert!(after[0].confirmed_names.contains(&"Ada Alt".to_string()));
+
+    let third = meeting(&library);
+    let third_saved = process(
+        &memory,
+        &third,
+        &call_transcript("them 1"),
+        call_samples("them 1", 25),
+    );
+    memory
+        .choose(
+            &Choice::new("them 1", Some("Sam".into()), DecisionAction::ConfirmOther),
+            &third,
+            &third_saved,
+        )
+        .unwrap();
+
+    let local = meeting(&library);
+    let local_transcript = Transcript {
+        segments: (0..4)
+            .map(|i| {
+                let start = i as f64 * 7.0;
+                segment(start, start + 6.0, "me", AttributionSource::Microphone)
+            })
+            .collect(),
+        engine: "test".into(),
+        ..Default::default()
+    };
+    let mic_turns: Vec<AudioTurn> = local_transcript
+        .segments
+        .iter()
+        .map(|s| AudioTurn {
+            speaker: s.speaker.clone(),
+            range: TurnAnchor {
+                start: s.start,
+                end: s.end,
+            },
+            source: Some(AttributionSource::Microphone),
+        })
+        .collect();
+    let mic_samples: Vec<VoiceSample> = (0..4)
+        .map(|i| sample("me", i as f64 * 7.0, 20, i, AttributionSource::Microphone))
+        .collect();
+    let local_saved = memory
+        .process(ProcessRequest {
+            transcript: &local_transcript,
+            meeting: &local,
+            turns: &mic_turns,
+            evidence: evidence(mic_samples),
+            mic: None,
+            system: None,
+            previous: None,
+            name_automatically: true,
+        })
+        .unwrap();
+    let mut confirm = Choice::new("me", Some("Alper".into()), DecisionAction::ConfirmUser);
+    confirm.action = DecisionAction::ConfirmUser;
+    memory.choose(&confirm, &local, &local_saved).unwrap();
+    let all = memory.profiles().unwrap();
+    let user_profile = all.iter().find(|p| p.is_local_user == Some(true)).unwrap();
+    let other_profile = all.iter().find(|p| p.is_local_user == Some(false)).unwrap();
+    assert!(matches!(
+        memory.merge_profiles(other_profile.id, user_profile.id),
+        Err(Failure::Stale)
+    ));
+}
