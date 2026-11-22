@@ -240,7 +240,6 @@ impl AppKind {
         matches!(
             self,
             Self::Teams
-                | Self::SkypeForBusiness
                 | Self::Slack
                 | Self::Discord
                 | Self::Feishu
@@ -285,7 +284,7 @@ fn native_kind(process: &str) -> Option<AppKind> {
         "zoom" | "zoom.real" | "cpthost" | "zoomwebviewhost" | "zoomworkplace" => AppKind::Zoom,
         "ciscocollabhost" | "atmgr" | "webex" | "webexmta" | "webexhost" => AppKind::Webex,
         "ms-teams" | "teams" | "teams-for-linux" | "msteams" => AppKind::Teams,
-        "lync" => AppKind::SkypeForBusiness,
+        "lync" | "skypemeetingsapp" => AppKind::SkypeForBusiness,
         "slack" => AppKind::Slack,
         "discord" | "discordptb" | "discordcanary" | "vesktop" => AppKind::Discord,
         "wemeetapp" | "wemeet" | "tencentmeeting" => AppKind::TencentMeeting,
@@ -1649,9 +1648,13 @@ mod tests {
     }
 
     #[test]
-    fn skype_for_business_lync_follows_teams_rules_and_links() {
+    fn skype_for_business_starts_immediately_and_ends_after_debounce() {
         assert_eq!(
             native_kind("lync.exe").map(AppKind::name),
+            Some("Skype for Business")
+        );
+        assert_eq!(
+            native_kind("SkypeMeetingsApp.exe").map(AppKind::name),
             Some("Skype for Business")
         );
         assert_eq!(
@@ -1664,28 +1667,20 @@ mod tests {
         );
 
         let start = Instant::now();
-        let mut core = Core::new(1);
-        let lync = evidence(&[stream(9, "lync.exe")]);
-        assert!(run(&mut core, start, 0, 10, &lync).is_empty());
-        let events = run(&mut core, start, 12, 14, &lync);
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].0, 12);
-        assert!(
-            matches!(&events[0].1, DetectorEvent::Started(m) if m.app_name == "Skype for Business")
-        );
-
-        let mut backed = Core::new(1);
-        backed.calendar.active = true;
-        let events = run(
-            &mut backed,
-            start,
-            0,
-            0,
-            &evidence(&[stream(9, "lync.exe")]),
-        );
-        assert!(
-            matches!(&events[..], [(0, DetectorEvent::Started(m))] if m.app_name == "Skype for Business")
-        );
+        for process in ["lync.exe", "SkypeMeetingsApp.exe"] {
+            let mut core = Core::new(1);
+            let call = evidence(&[stream(9, process)]);
+            let started = run(&mut core, start, 0, 0, &call);
+            assert!(
+                matches!(&started[..], [(0, DetectorEvent::Started(m))] if m.app_name == "Skype for Business"),
+                "{process}: {started:?}"
+            );
+            let ended = run(&mut core, start, 2, 20, &Evidence::default());
+            assert!(
+                matches!(&ended[..], [(18, DetectorEvent::Ended(m))] if m.app_name == "Skype for Business"),
+                "{process}: {ended:?}"
+            );
+        }
     }
 
     #[test]

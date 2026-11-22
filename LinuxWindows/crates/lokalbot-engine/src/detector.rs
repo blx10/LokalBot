@@ -55,7 +55,7 @@ fn run(
         let settings = shared.settings();
         let now = chrono::Utc::now();
         let event = shared.calendar.active_event(&settings, now);
-        let events = {
+        let (events, active_now) = {
             let mut detector = detector.lock();
             detector.set_stop_debounce(Duration::from_secs_f64(
                 settings.stop_debounce_seconds.clamp(5.0, 120.0),
@@ -68,8 +68,9 @@ fn run(
                 );
             }
             let events = detector.poll();
-            *shared.detected_meeting.lock() = detector.active().cloned();
-            events
+            let active_now = detector.active().cloned();
+            *shared.detected_meeting.lock() = active_now.clone();
+            (events, active_now)
         };
         for detected in events {
             match detected {
@@ -105,7 +106,9 @@ fn run(
                     }
                 }
                 DetectorEvent::Ended(meeting) => {
-                    if let Some(ended) = call.take_if(|c| c.meeting.pid == meeting.pid) {
+                    if let Some(ended) = call.take_if(|c| {
+                        c.meeting.pid == meeting.pid || c.meeting.app_name == meeting.app_name
+                    }) {
                         *shared.detected_call.lock() = None;
                         if ended.recording {
                             let _ = commands.send(Command::CallEnded);
@@ -114,6 +117,7 @@ fn run(
                 }
             }
         }
+        sync_active_call(&mut call, active_now.as_ref());
         if let (Some(current), Some(next)) = (&mut call, &event) {
             hand_over(&shared, &commands, &settings, current, next);
         }
@@ -125,6 +129,14 @@ fn start_mode(habit: AutoRecordMode, meeting: &DetectedMeeting) -> AutoRecordMod
         AutoRecordMode::Ask
     } else {
         habit
+    }
+}
+
+fn sync_active_call(call: &mut Option<Call>, active: Option<&DetectedMeeting>) {
+    if let (Some(current), Some(latest)) = (call.as_mut(), active)
+        && current.meeting.app_name == latest.app_name
+    {
+        current.meeting = latest.clone();
     }
 }
 
@@ -279,5 +291,49 @@ mod tests {
         assert_eq!(backed.meeting_url.as_deref(), Some("https://zoom.us/j/1"));
         assert_eq!(backed.grace, Some(policy::CALENDAR_BACKED_GRACE));
         assert!(!hint(&settings, None).active);
+    }
+
+    #[test]
+    fn sync_active_call_updates_same_app_pid_and_ignores_other_apps() {
+        let initial = DetectedMeeting {
+            app_name: "Skype for Business".into(),
+            process_name: "lync.exe".into(),
+            pid: 100,
+            audio_pid: 100,
+            meeting_url: None,
+            title_hint: None,
+            microphone_detected: false,
+            needs_confirmation: false,
+        };
+        let mut call = Some(Call {
+            meeting: initial,
+            event_id: None,
+            recording: true,
+        });
+        let updated = DetectedMeeting {
+            app_name: "Skype for Business".into(),
+            process_name: "lync.exe".into(),
+            pid: 202,
+            audio_pid: 202,
+            meeting_url: None,
+            title_hint: None,
+            microphone_detected: false,
+            needs_confirmation: false,
+        };
+        sync_active_call(&mut call, Some(&updated));
+        assert_eq!(call.as_ref().map(|c| c.meeting.pid), Some(202));
+
+        let other = DetectedMeeting {
+            app_name: "Zoom".into(),
+            process_name: "Zoom.exe".into(),
+            pid: 303,
+            audio_pid: 303,
+            meeting_url: None,
+            title_hint: None,
+            microphone_detected: false,
+            needs_confirmation: false,
+        };
+        sync_active_call(&mut call, Some(&other));
+        assert_eq!(call.as_ref().map(|c| c.meeting.pid), Some(202));
     }
 }

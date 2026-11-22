@@ -511,17 +511,33 @@ fn meeting_url(component: &ICalendarComponent, description: Option<&str>) -> Opt
         .property(&ICalendarProperty::Url)
         .and_then(|e| e.values.first())
         .and_then(value_text);
+    let skype_teams = other_text(component, "X-MICROSOFT-SKYPETEAMSMEETINGURL");
+    let online_conf = other_text(component, "X-MICROSOFT-ONLINEMEETINGCONFLINK");
     let candidates = [
         url,
         other_text(component, "X-GOOGLE-CONFERENCE"),
-        other_text(component, "X-MICROSOFT-SKYPETEAMSMEETINGURL"),
-        other_text(component, "X-MICROSOFT-ONLINEMEETINGCONFLINK"),
+        skype_teams.clone(),
+        online_conf.clone(),
         text_property(component, &ICalendarProperty::Location),
         description.map(str::to_string),
     ];
     candidates
         .iter()
         .find_map(|text| first_meeting_url(text.as_deref()))
+        .or_else(|| direct_http_url(skype_teams.as_deref()))
+        .or_else(|| direct_http_url(online_conf.as_deref()))
+}
+
+fn direct_http_url(text: Option<&str>) -> Option<String> {
+    let trimmed = text?.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if !(lower.starts_with("https://") || lower.starts_with("http://"))
+        || trimmed.chars().any(char::is_whitespace)
+    {
+        return None;
+    }
+    lokalbot_core::calendar::url_host(trimmed)?;
+    Some(trimmed.to_string())
 }
 
 fn is_transparent(component: &ICalendarComponent) -> bool {
@@ -836,6 +852,26 @@ mod tests {
                 &options("2026-10-19T00:00:00Z", "2026-10-27T00:00:00Z")
             )
             .is_err()
+        );
+    }
+
+    #[test]
+    fn extracts_on_premises_skype_meeting_url_from_microsoft_property() {
+        let event = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\n\
+            UID:sfb-onprem-1\r\nDTSTAMP:20261020T080000Z\r\n\
+            DTSTART:20261020T100000Z\r\nDTEND:20261020T103000Z\r\n\
+            SUMMARY:On-prem SfB Sync\r\n\
+            X-MICROSOFT-SKYPETEAMSMEETINGURL:https://meet.corp.example/alice/ABC123\r\n\
+            END:VEVENT\r\nEND:VCALENDAR";
+        let events = parse_events(
+            event,
+            &options("2026-10-19T00:00:00Z", "2026-10-22T00:00:00Z"),
+        )
+        .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0].meeting_url.as_deref(),
+            Some("https://meet.corp.example/alice/ABC123")
         );
     }
 }
