@@ -23,7 +23,7 @@ the bar a decision has to clear.
 | [0004](0004-recording.md) | Recording | 48 |
 | [0005](0005-transcription-and-speakers.md) | Transcription and speakers | 82 |
 | [0006](0006-meetings-and-notes.md) | Meetings and notes | 58 |
-| [0007](0007-meeting-detection-and-calendar-matching.md) | Meeting detection and calendar matching | 35 |
+| [0007](0007-meeting-detection-and-calendar-matching.md) | Meeting detection and calendar matching | 36 |
 | [0008](0008-screen-memory.md) | Screen memory | 57 |
 | [0009](0009-timeline-today-and-the-dream-review.md) | Timeline, Today and the Dream review | 48 |
 | [0010](0010-ask-and-search.md) | Ask and search | 43 |
@@ -32,7 +32,7 @@ the bar a decision has to clear.
 | [0013](0013-coding-agent-sessions.md) | Coding-agent sessions | 39 |
 | [0014](0014-file-search.md) | File search | 22 |
 | [0015](0015-people-personal-model-projects-and-actions.md) | People, personal model, projects and actions | 34 |
-| [0016](0016-email-and-calendar-access.md) | Email and calendar access | 29 |
+| [0016](0016-email-and-calendar-access.md) | Email and calendar access | 32 |
 | [0017](0017-phone-and-tablet-companion-and-sync.md) | Phone and tablet companion and sync | 40 |
 | [0018](0018-cli-mcp-and-app-control.md) | CLI, MCP and app control | 44 |
 | [0019](0019-settings-onboarding-and-permissions.md) | Settings, onboarding and permissions | 22 |

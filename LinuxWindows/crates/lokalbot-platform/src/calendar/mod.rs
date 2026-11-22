@@ -14,7 +14,6 @@ pub use ics::ParseOptions;
 pub struct CalendarSources {
     pub links: Vec<String>,
     pub evolution: bool,
-    /// Windows: read Classic Outlook's primary calendar while open.
     pub outlook: bool,
 }
 

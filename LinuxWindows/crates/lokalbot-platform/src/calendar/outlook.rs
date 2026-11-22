@@ -1,11 +1,3 @@
-//! Classic Outlook on Windows, read locally over COM (`Outlook.Application`)
-//! while Outlook is already open.
-//!
-//! Never starts Outlook when it is closed (`GetActiveObject` only, never
-//! `CoCreateInstance`), reads only the primary MAPI account's default calendar
-//! (`olFolderCalendar = 9`), and treats `Recipients` and `Body` as optional so
-//! an Outlook Object Model Guard policy cannot break meeting detection.
-
 use chrono::{DateTime, Utc};
 use lokalbot_core::calendar::{
     CalendarEvent, RawCalendarEvent, first_meeting_url, is_recordable_meeting, provider,
@@ -48,13 +40,9 @@ pub(crate) struct RawOutlookItem {
     pub online_meeting_external_link: Option<String>,
     pub skype_teams_meeting_url: Option<String>,
     pub online_meeting_conf_link: Option<String>,
-    /// `None` if Outlook Object Model Guard blocked reading `Recipients`.
     pub attendees: Option<Vec<RawOutlookAttendee>>,
 }
 
-/// Extracts an `https://` meeting link from a dedicated MAPI conferencing
-/// property (allowing corporate on-premises Skype for Business hosts such as
-/// `https://meet.corp.local/...`), while rejecting non-HTTP schemes like `sip:`.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn validated_https_meeting_url(raw: Option<&str>) -> Option<String> {
     let trimmed = raw?.trim();
@@ -77,8 +65,6 @@ pub(crate) fn validated_https_meeting_url(raw: Option<&str>) -> Option<String> {
     Some(candidate.to_string())
 }
 
-/// Normalizes an SMTP address and rejects Exchange X500 legacy distinguished names
-/// (`/O=.../OU=.../cn=...`).
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn clean_smtp_address(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
@@ -123,8 +109,6 @@ pub(crate) fn map_item(
             });
     let has_attendees = match &item.attendees {
         Some(list) => !list.is_empty(),
-        // Fall back to `MeetingStatus` (`olMeeting` = 1, `olMeetingReceived` = 3)
-        // when `Recipients` is blocked by an Object Model Guard policy.
         None => matches!(item.meeting_status, 1 | 3),
     };
     let title = item
@@ -216,7 +200,6 @@ mod com {
 
     impl ComScope {
         fn enter() -> Self {
-            // SAFETY: initializes STA on this worker thread; balanced in `Drop` when `is_ok()`.
             let result = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
             Self {
                 initialized: result.is_ok(),
@@ -227,22 +210,17 @@ mod com {
     impl Drop for ComScope {
         fn drop(&mut self) {
             if self.initialized {
-                // SAFETY: matches the successful CoInitializeEx above.
                 unsafe { CoUninitialize() };
             }
         }
     }
 
-    /// Reads the primary MAPI calendar of a running Classic Outlook instance.
-    /// Returns `Ok(None)` when Outlook is closed or not installed.
     pub fn fetch(options: &ParseOptions) -> Result<Option<Vec<CalendarEvent>>> {
         let _com = ComScope::enter();
         let Ok(clsid) = (unsafe { CLSIDFromProgID(w!("Outlook.Application")) }) else {
             return Ok(None);
         };
         let mut unknown: Option<IUnknown> = None;
-        // SAFETY: `GetActiveObject` only attaches to an already-running instance and
-        // never launches `OUTLOOK.EXE`.
         if unsafe { GetActiveObject(&clsid, None, &mut unknown) }.is_err() {
             return Ok(None);
         }
@@ -275,7 +253,6 @@ mod com {
 
         let items = dispatch_get_dispatch(&folder, "Items")
             .context("could not open Outlook calendar items")?;
-        // Mandatory Outlook Object Model order: Sort before IncludeRecurrences, then Restrict.
         dispatch_call(&items, "Sort", &mut [VARIANT::from("[Start]")])
             .context("could not sort Outlook calendar items")?;
         dispatch_put(&items, "IncludeRecurrences", VARIANT::from(true))
@@ -446,8 +423,6 @@ mod com {
         Some(list)
     }
 
-    /// Formats a local timestamp using the user's Windows short-date + no-seconds
-    /// time format, as Outlook Jet `Restrict` expects.
     fn jet_datetime(at: DateTime<Local>) -> Result<String> {
         use chrono::{Datelike as _, Timelike as _};
         let st = SYSTEMTIME {
@@ -461,7 +436,6 @@ mod com {
             wMilliseconds: 0,
         };
         let mut date_buf = [0u16; 64];
-        // SAFETY: `st` is valid and `date_buf` has capacity 64.
         let date_len = unsafe {
             GetDateFormatEx(
                 PCWSTR::null(),
@@ -476,7 +450,6 @@ mod com {
             return Err(anyhow!("GetDateFormatEx failed"));
         }
         let mut time_buf = [0u16; 64];
-        // SAFETY: `st` is valid and `time_buf` has capacity 64.
         let time_len = unsafe {
             GetTimeFormatEx(
                 PCWSTR::null(),
@@ -498,7 +471,6 @@ mod com {
         let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
         let pcwstr = PCWSTR(wide.as_ptr());
         let mut id = 0i32;
-        // SAFETY: `pcwstr` points to a null-terminated UTF-16 string valid for this call.
         unsafe {
             dispatch.GetIDsOfNames(&GUID::zeroed(), &pcwstr, 1, LOCALE_USER_DEFAULT, &mut id)
         }
@@ -534,7 +506,6 @@ mod com {
             }
         };
         let mut result = VARIANT::default();
-        // SAFETY: `params` and `result` are valid for the duration of `Invoke`.
         unsafe {
             dispatch.Invoke(
                 id,
@@ -588,10 +559,8 @@ mod com {
         if v.vt() != VT_DATE {
             return Err(anyhow!("expected VT_DATE from Outlook"));
         }
-        // SAFETY: `vt() == VT_DATE` guarantees the `date` field is active.
         let vdate = unsafe { v.Anonymous.Anonymous.Anonymous.date };
         let mut st = SYSTEMTIME::default();
-        // SAFETY: `st` is an out parameter owned by this function.
         if unsafe { VariantTimeToSystemTime(vdate, &mut st) } == 0 {
             return Err(anyhow!("invalid Outlook date"));
         }
@@ -607,7 +576,6 @@ mod com {
 
     fn variant_string(v: &VARIANT) -> Result<String> {
         if v.vt() == VT_BSTR {
-            // SAFETY: `vt() == VT_BSTR` guarantees `bstrVal` is active.
             return Ok(unsafe { (*v.Anonymous.Anonymous.Anonymous.bstrVal).to_string() });
         }
         Err(anyhow!("expected string from Outlook"))
@@ -773,9 +741,6 @@ mod tests {
         );
     }
 
-    /// Reads the running Classic Outlook instance on Windows. Seed a meeting
-    /// today and run:
-    /// `set LOKALBOT_OUTLOOK_LIVE_TEST=1 && cargo test -p lokalbot-platform live_outlook -- --ignored`
     #[cfg(windows)]
     #[test]
     #[ignore = "needs a running Classic Outlook session on Windows"]

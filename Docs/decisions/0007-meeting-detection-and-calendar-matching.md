@@ -59,6 +59,12 @@ Zoom, Webex, Tencent Meeting and VooV Meeting start at once. Teams, Slack, Disco
 
 Where: `LokalBot/Services/Recording/MeetingDetector.swift` (`MeetingDetector.nativeAudioMinimumConfirmationDuration`, `MeetingDetector.requiresSustainedAudioForStart`), `LokalBotTests/Services/Calendar/CalendarDetectionTests.swift` (`MeetingDetector.requiresSustainedAudioForStart`), `LinuxWindows/crates/lokalbot-platform/src/meeting/mod.rs`.
 
+### Skype for Business (lync.exe and SkypeMeetingsApp.exe) starts at once and updates active call PIDs by app
+
+`lync.exe` and `SkypeMeetingsApp.exe` start immediately without the 12 s sustained-audio wait so short Skype for Business calls are captured from the beginning. Because Skype for Business or child audio sessions can hand off between PIDs during a call, `detector.rs` syncs `Call.meeting` when the active detected app stays the same and matches `DetectorEvent::Ended` by either `pid` or `app_name` so auto-recording never stays stuck on after the call ends.
+
+Where: `LinuxWindows/crates/lokalbot-platform/src/meeting/mod.rs` (`AppKind::SkypeForBusiness`, `native_kind`), `LinuxWindows/crates/lokalbot-engine/src/detector.rs` (`sync_active_call`, `run`).
+
 ### Start confirmation tolerates audio gaps up to 6 s
 
 Confirmation requires current audio (`requireAudio: true`), which asks whether the remote side is making sound right now, and in a real conversation the remote side spends much of its time listening. Without a tolerance the first quiet turn dropped the candidate entirely: on 2026-08-26 six consecutive attempts on a live Teams call each failed after 4.2–12.7 s, two of them past the 12 s mark. The window now survives gaps up to 6 s, half the window on purpose, and is abandoned only once the gap itself runs past that, so a single blip followed by silence still resets; the tolerance only bridges gaps in evidence and never invents any, so an idle open app cannot confirm.

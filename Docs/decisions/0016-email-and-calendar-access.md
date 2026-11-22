@@ -5,7 +5,7 @@
 
 ## Context
 
-On the Mac, LokalBot signs in to Gmail with read-only access, downloads the conversations that involve the person or the people on their calendar, and quotes that mail in meeting briefs. The Windows and Linux app reads the person's calendars (Evolution Data Server on Linux, or private iCalendar links) for calendar-assisted meeting detection and for People's upcoming meetings. These decisions were moved here from code comments when the code stopped carrying comments ([ADR 0001](0001-code-carries-no-comments.md)).
+On the Mac, LokalBot signs in to Gmail with read-only access, downloads the conversations that involve the person or the people on their calendar, and quotes that mail in meeting briefs. The Windows and Linux app reads the person's calendars (Evolution Data Server on Linux, Classic Outlook on Windows while open, or private iCalendar links) for calendar-assisted meeting detection and for People's upcoming meetings. These decisions were moved here from code comments when the code stopped carrying comments ([ADR 0001](0001-code-carries-no-comments.md)).
 
 ## Reading calendars (Windows and Linux)
 
@@ -20,6 +20,24 @@ Where: `LinuxWindows/crates/lokalbot-app/src/pages/people.rs` (`PeoplePage.refre
 LokalBot reads every enabled, selected calendar the desktop knows through Evolution Data Server over D-Bus, including those GNOME Online Accounts adds (Google, Microsoft 365, Nextcloud). EDS keeps its own synced copy, so reading it makes no network request of LokalBot's own. `CalendarFactory.OpenCalendar` starts or reuses a backend whose object lives only while the D-Bus connection does, so one connection serves a whole refresh.
 
 Where: `LinuxWindows/crates/lokalbot-platform/src/calendar/eds.rs`.
+
+### On Windows, attach to a running Classic Outlook only and read only the primary calendar
+
+On Windows, LokalBot attaches only to an already-running `Outlook.Application` instance via `GetActiveObject` (`CLSCTX` activation via `CoCreateInstance` is never used, so LokalBot never launches Outlook when it is closed), and reads only the primary MAPI account's default calendar (`Session.GetDefaultFolder(9)`, `olFolderCalendar`). `Settings.calendar_outlook_enabled` is a separate `Consent` setting that defaults to `false` so existing installs do not widen calendar access automatically, and the account's own SMTP address is read from `Session.Accounts` (`SmtpAddress`) rather than `Session.CurrentUser` to avoid triggering Outlook Object Model Guard prompts.
+
+Where: `LinuxWindows/crates/lokalbot-platform/src/calendar/outlook.rs` (`com::fetch`, `com::primary_account_smtp`), `LinuxWindows/crates/lokalbot-core/src/settings.rs` (`Settings.calendar_outlook_enabled`).
+
+### Sort before enabling recurrences, restrict with user-locale dates without seconds, and never call Items.Count
+
+The Outlook Object Model requires calling `Items.Sort("[Start]")` before setting `IncludeRecurrences = true` (which must pass `DISPID_PROPERTYPUT = -3` on `DISPATCH_PROPERTYPUT`) and before `Restrict`. Jet `Restrict` filters are formatted in local time using the user's Windows short-date and no-seconds time formats (`GetDateFormatEx` with `DATE_SHORTDATE` + `GetTimeFormatEx` with `TIME_NOSECONDS`) while item bounds are read from `StartUTC`/`EndUTC`, and iteration uses `GetFirst`/`GetNext` capped at `MAX_ITEMS` (`1_024`) because `Items.Count` returns `i32::MAX` when `IncludeRecurrences` is enabled.
+
+Where: `LinuxWindows/crates/lokalbot-platform/src/calendar/outlook.rs` (`com::fetch`, `com::jet_datetime`, `com::invoke`).
+
+### Treat Outlook Recipients and Body as optional and accept corporate on-premises HTTPS links from MAPI properties
+
+Outlook Object Model Guard policies can block `Recipients` or `Body`, so both degrade gracefully (`has_attendees` falls back to `MeetingStatus` values `1` and `3`). Exchange X500 legacy distinguished names starting with `/` are rejected from SMTP normalization, validated `https://` links in `OnlineMeetingExternalLink`, `SkypeTeamsMeetingUrl`, and `OnlineMeetingConfLink` are accepted even on private corporate Skype for Business domains, and non-HTTP `sip:` `OnlineMeetingConfLink` values still mark `has_meeting_url` without exposing a non-web URL.
+
+Where: `LinuxWindows/crates/lokalbot-platform/src/calendar/outlook.rs` (`map_item`, `validated_https_meeting_url`, `clean_smtp_address`), `LinuxWindows/crates/lokalbot-platform/src/calendar/ics.rs` (`meeting_url`, `direct_http_url`).
 
 ### Parse iCalendar with `calcard` and apply recurrence overrides by instant
 
