@@ -65,6 +65,9 @@ impl Updater {
         debug_build: bool,
         env: &dyn Fn(&str) -> Option<String>,
     ) -> Option<Self> {
+        if cfg!(feature = "disable-auto-update") {
+            return None;
+        }
         let mut updater = Self::new(
             platform,
             crate::feed_url(platform),
@@ -135,6 +138,9 @@ impl Updater {
     }
 
     pub fn check(&self) -> Result<Check, UpdateError> {
+        if cfg!(feature = "disable-auto-update") {
+            return Ok(Check::Unpublished);
+        }
         let agent = ureq::Agent::new_with_config(
             ureq::Agent::config_builder()
                 .https_only(!self.allow_loopback_http)
@@ -186,6 +192,11 @@ impl Updater {
         cancel: &AtomicBool,
         progress: &mut dyn FnMut(u64, u64),
     ) -> Result<PathBuf, UpdateError> {
+        if cfg!(feature = "disable-auto-update") {
+            return Err(UpdateError::Download(
+                "auto-update is disabled in this build".into(),
+            ));
+        }
         let feed = &release.feed;
         let dir = self.work_dir.join(&feed.version);
         let archive = dir.join(feed.archive_name());
@@ -375,6 +386,7 @@ mod tests {
         )
     }
 
+    #[cfg(not(feature = "disable-auto-update"))]
     fn newer(updater: &Updater) -> Release {
         match updater.check().unwrap() {
             Check::Newer(release) => *release,
@@ -382,6 +394,7 @@ mod tests {
         }
     }
 
+    #[cfg(not(feature = "disable-auto-update"))]
     #[test]
     fn checks_downloads_verifies_and_unpacks() {
         let server = Server::start();
@@ -405,6 +418,7 @@ mod tests {
         assert!(!work.path().exists());
     }
 
+    #[cfg(not(feature = "disable-auto-update"))]
     #[test]
     fn up_to_date_older_and_unpublished_feeds() {
         let server = Server::start();
@@ -431,6 +445,7 @@ mod tests {
         ));
     }
 
+    #[cfg(not(feature = "disable-auto-update"))]
     #[test]
     fn rejects_a_tampered_archive_before_unpacking() {
         let server = Server::start();
@@ -460,6 +475,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "disable-auto-update"))]
     #[test]
     fn rejects_an_archive_signed_with_another_key() {
         let server = Server::start();
@@ -478,6 +494,7 @@ mod tests {
         ));
     }
 
+    #[cfg(not(feature = "disable-auto-update"))]
     #[test]
     fn rejects_a_mismatched_digest() {
         let server = Server::start();
@@ -496,6 +513,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(feature = "disable-auto-update"))]
     #[test]
     fn rejects_an_older_signed_archive_relabelled_as_newer() {
         let server = Server::start();
@@ -518,6 +536,7 @@ mod tests {
         move |name: &str| vars.get(name).cloned()
     }
 
+    #[cfg(not(feature = "disable-auto-update"))]
     #[test]
     fn plain_http_feeds_must_be_local() {
         let work = tempfile::tempdir().unwrap();
@@ -557,5 +576,56 @@ mod tests {
         assert!(!remote.allow_loopback_http);
         let refused = configure(false, &[(FEED_URL_ENV, "http://example.com/feed.json")]).unwrap();
         assert_eq!(refused.feed_url(), crate::feed_url(PLATFORM));
+    }
+
+    #[cfg(feature = "disable-auto-update")]
+    #[test]
+    fn auto_update_disabled_refuses_configure_even_with_feed_override() {
+        let work = tempfile::tempdir().unwrap();
+        let configure = |debug: bool, vars: &[(&'static str, &str)]| {
+            Updater::configure(work.path().into(), PLATFORM, debug, &env(vars))
+        };
+        let other = key(OTHER_SEED).public_key().to_base64();
+        assert!(Updater::for_this_build(work.path().into()).is_none());
+        assert!(configure(false, &[]).is_none());
+        assert!(configure(true, &[]).is_none());
+        assert!(
+            configure(
+                false,
+                &[(FEED_URL_ENV, "https://example.com/linux-x86_64.json")],
+            )
+            .is_none()
+        );
+        assert!(
+            configure(
+                true,
+                &[
+                    (FEED_URL_ENV, "http://127.0.0.1:8765/linux-x86_64.json"),
+                    (PUBLIC_KEY_ENV, &other),
+                    (CURRENT_VERSION_ENV, "0.9.0"),
+                ],
+            )
+            .is_none()
+        );
+    }
+
+    #[cfg(feature = "disable-auto-update")]
+    #[test]
+    fn auto_update_disabled_refuses_check_and_prepare() {
+        let server = Server::start();
+        let work = tempfile::tempdir().unwrap();
+        let feed = publish(&server, "0.10.11", &release_archive("0.10.11"), &key(SEED));
+        let updater = updater(&server, "0.10.10", work.path());
+        assert_eq!(updater.check().unwrap(), Check::Unpublished);
+        let release = Release {
+            feed,
+            version: Version::new(0, 10, 11),
+            installable: true,
+        };
+        let err = updater
+            .prepare(&release, &AtomicBool::new(false), &mut |_, _| {})
+            .unwrap_err();
+        assert!(matches!(err, UpdateError::Download(_)), "{err}");
+        assert!(!work.path().join("0.10.11").exists());
     }
 }

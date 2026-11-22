@@ -81,15 +81,23 @@ pub struct Updates {
     install_when_found: bool,
 }
 
+fn manage_installed_state() -> bool {
+    !cfg!(feature = "disable-auto-update")
+}
+
 pub fn start(data: &Entity<AppData>, cx: &mut App) {
     let work_dir = data.read(cx).library.paths().root().join("updates");
     let updater = Updater::for_this_build(work_dir).map(Arc::new);
-    let installation = match Installation::current() {
-        Ok(installation) => Some(installation),
-        Err(err) => {
-            log::warn!("updates: could not find this installation: {err}");
-            None
+    let installation = if manage_installed_state() {
+        match Installation::current() {
+            Ok(installation) => Some(installation),
+            Err(err) => {
+                log::warn!("updates: could not find this installation: {err}");
+                None
+            }
         }
+    } else {
+        None
     };
     match (&updater, &installation) {
         (Some(updater), Some(installation)) => log::info!(
@@ -104,7 +112,9 @@ pub fn start(data: &Entity<AppData>, cx: &mut App) {
     if let Some(updater) = &updater {
         updater.clear_work_dir();
     }
-    if let Some(installation) = &installation {
+    if manage_installed_state()
+        && let Some(installation) = &installation
+    {
         let targets = installation.targets();
         cx.background_spawn(async move {
             record_installed_version(&targets.dir, &Version::current());
@@ -181,6 +191,9 @@ impl Updates {
     }
 
     pub fn check(&mut self, manual: bool, cx: &mut Context<Self>) {
+        if cfg!(feature = "disable-auto-update") {
+            return;
+        }
         let Some(updater) = self.updater.clone() else {
             return;
         };
@@ -297,6 +310,9 @@ impl Updates {
     }
 
     pub fn install(&mut self, cx: &mut Context<Self>) {
+        if cfg!(feature = "disable-auto-update") {
+            return;
+        }
         let (Some(updater), Some(release)) = (self.updater.clone(), self.status.release().cloned())
         else {
             return;
@@ -487,6 +503,9 @@ pub fn open_release_page(cx: &mut App) {
 }
 
 fn record_installed_version(dir: &std::path::Path, version: &Version) {
+    if !manage_installed_state() {
+        return;
+    }
     match lokalbot_update::installed_apps::record_version(dir, version) {
         Ok(true) => log::info!("updates: Installed apps now shows LokalBot {version}"),
         Ok(false) => {}
@@ -751,5 +770,16 @@ mod tests {
             route(true, Some(&package(Manager::Pacman, "lokalbot-bin"))),
             Route::Install
         );
+    }
+
+    #[test]
+    fn disable_auto_update_feature_gates_updater_and_install_bookkeeping() {
+        let temp = tempfile::tempdir().unwrap();
+        if cfg!(feature = "disable-auto-update") {
+            assert!(!manage_installed_state());
+            assert!(Updater::for_this_build(temp.path().to_path_buf()).is_none());
+        } else {
+            assert!(manage_installed_state());
+        }
     }
 }

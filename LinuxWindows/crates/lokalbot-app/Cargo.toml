@@ -7,6 +7,10 @@ license.workspace = true
 publish.workspace = true
 rust-version.workspace = true
 
+[features]
+default = []
+disable-auto-update = ["lokalbot-update/disable-auto-update"]
+
 [[bin]]
 name = "lokalbot"
 path = "src/main.rs"

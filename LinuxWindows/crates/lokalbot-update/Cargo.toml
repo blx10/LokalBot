@@ -13,6 +13,7 @@ default = ["client"]
 # feeds builds without it (`--no-default-features`), so the release job does
 # not compile the AI crates.
 client = ["dep:lokalbot-ai", "dep:lokalbot-core", "dep:ureq", "dep:log", "dep:uuid"]
+disable-auto-update = []
 
 [[bin]]
 name = "lokalbot-update-feed"

@@ -30,3 +30,19 @@ Read the relevant sections when the task touches them:
 - Retrieving recorded work through the CLI or MCP: [.agents/skills/lokalbot-cli/SKILL.md](.agents/skills/lokalbot-cli/SKILL.md).
 
 Report whether the requested result was built, tested, installed, or released, with any concrete blocker and remaining work. A successful build or CI run alone does not establish installation or release completion.
+
+## Fork & upstream sync policy (`blx10/LokalBot`)
+
+This repository is the `blx10/LokalBot` (`origin`) personal fork of `stevyhacker/LokalBot` (`upstream`). Keep upstream updates and fork-only customizations cleanly separated at all times:
+
+- **Read-only `upstream` remote**: `upstream` (`https://github.com/stevyhacker/LokalBot.git`) is read-only (`push` URL MUST remain `DISABLED`). Never push directly to `upstream`.
+- **Branch from `upstream/master` for every feature / PR**: Create every new feature branch or PR targeting `stevyhacker/LokalBot` directly from `upstream/master` (`git checkout -b feat/<name> upstream/master`). Never branch an upstream PR off `master`, and never include fork-only files (`AGENTS.md` fork section, `FORK_PATCHES.md`, `Scripts/fork/sync-upstream.sh`, `.agents/skills/fork-sync/SKILL.md`) in any PR to `stevyhacker/LokalBot`.
+- **Linear rebased `master`**: `master` MUST remain a linear patch stack on top of `upstream/master` (`upstream/master` → active `feat/*` commits → single fork-meta commit at tip). Never create merge commits from `upstream/master` into `master`; push updated `master` with `git push --force-with-lease origin master`.
+- **Auto-update permanently disabled on test & feature builds**: Every test, feature, or portable Windows build produced on this fork MUST compile with `--features disable-auto-update` (which disables update checking, feed overrides including `LOKALBOT_UPDATE_FEED_URL`, download/preparation, and Uninstall registry version writes) so upstream GitHub releases never overwrite it. Keep `disable-auto-update` opt-in (off in `default` features) so upstream-targeted PR branches leave standard upstream release behavior unchanged. Never overwrite, replace, or update the user's installed binary (`%LOCALAPPDATA%\Programs\LokalBot\lokalbot.exe`).
+- **Mandatory sync & auto-drop workflow**: Whenever syncing with `upstream`:
+  1. Fetch latest refs: `git fetch upstream --tags --prune && git fetch origin --prune`.
+  2. Check merged upstream PRs (`gh pr list --repo stevyhacker/LokalBot --author blx10 --state merged`) AND inspect `git log --oneline <previous-base>..upstream/master` for any feature now implemented upstream (even under a different PR or commit).
+  3. Drop every feature/commit whose PR merged or whose capability landed in `upstream/master`, update `FORK_PATCHES.md` to record the drop, and delete obsolete local/remote feature branches and worktrees when safe.
+  4. Rebase remaining active `feat/*` branches onto `upstream/master`, rebuild `master` linearly (`git checkout -B master upstream/master`, apply remaining active feature commits, apply the fork-meta commit), verify with relevant tests, and push with `--force-with-lease`.
+- **Automation & skill**: Run `Scripts/fork/sync-upstream.sh --check` (or follow [.agents/skills/fork-sync/SKILL.md](.agents/skills/fork-sync/SKILL.md)) for every upstream sync.
+- **Turkish sync triggers**: User phrases such as `"origine göre güncelle"`, `"orjinal repo ile güncelle"`, `"orijinal repo ile güncelle"`, or `"upstream'i sync et"` all mean syncing this fork against `upstream` (`stevyhacker/LokalBot`) using the workflow above.
