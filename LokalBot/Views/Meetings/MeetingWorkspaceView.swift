@@ -236,11 +236,7 @@ private struct MeetingWorkspaceDetail: View {
                         activeMatch: activeSearchMatch,
                         canNameSpeakers: !savingSpeakerIdentity,
                         onSpeaker: { speaker in
-                            if speaker.needsName {
-                                namingSpeakers = true
-                            } else {
-                                beginRenameSpeaker(speaker.id)
-                            }
+                            beginRenameSpeaker(speaker.id)
                         },
                         onNameSpeakers: { namingSpeakers = true })
                     playerBar

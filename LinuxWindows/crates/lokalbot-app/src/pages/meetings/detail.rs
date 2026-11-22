@@ -305,11 +305,7 @@ impl MeetingsPage {
                     )
                     .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        if needs_name {
-                            this.open_naming_sheet(window, cx);
-                        } else {
-                            this.open_name_speaker_key(&key, window, cx);
-                        }
+                        this.open_name_speaker_key(&key, window, cx);
                     })),
             );
         }
