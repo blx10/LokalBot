@@ -417,6 +417,8 @@ fn profiles_of_another_voice_model_are_never_compared_or_added_to() {
             confirmed_at: chrono::Utc::now(),
             samples: vec![mac_sample.clone()],
             voiceprint: Some(voice(3, 0)),
+            meeting_title: None,
+            meeting_started_at: None,
         }],
         model: mac_sample.model.clone(),
     };
@@ -482,7 +484,7 @@ fn saved_meetings_only_get_suggestions_until_a_person_applies_them() {
 }
 
 #[test]
-fn deleting_a_meeting_revokes_its_contributions() {
+fn deleting_a_meeting_preserves_profile_and_metadata() {
     let (_dir, library) = library();
     let memory = memory(&library);
     let first = meeting(&library);
@@ -501,7 +503,16 @@ fn deleting_a_meeting_revokes_its_contributions() {
         .unwrap();
     assert_eq!(memory.profiles().unwrap().len(), 1);
     memory.prepare_deletion(&first).unwrap();
-    assert!(memory.profiles().unwrap().is_empty());
+    let profiles = memory.profiles().unwrap();
+    assert_eq!(profiles.len(), 1);
+    assert_eq!(
+        profiles[0].contributions[0].meeting_title.as_deref(),
+        Some(first.display_title().as_str())
+    );
+    assert_eq!(
+        profiles[0].contributions[0].meeting_started_at,
+        Some(first.started_at)
+    );
     let database = memory.store().unwrap().profiles().unwrap();
     assert!(database.deleted_meetings.contains(&first.id));
 }
@@ -796,7 +807,7 @@ fn reads_the_macs_timing_file() {
 }
 
 #[test]
-fn a_removed_meetings_voice_leaves_when_it_can_be_opened_again() {
+fn a_removed_meetings_voice_stays_preserved_with_metadata() {
     let (_dir, library) = library();
     let memory = memory(&library);
     let first = meeting(&library);
@@ -823,8 +834,7 @@ fn a_removed_meetings_voice_leaves_when_it_can_be_opened_again() {
     assert_eq!(memory.profiles().unwrap().len(), 2);
     memory.revoke_removed_meetings(std::slice::from_ref(&second));
     let people = memory.profiles().unwrap();
-    assert_eq!(people.len(), 1);
-    assert_eq!(people[0].name, "Person 9");
+    assert_eq!(people.len(), 2);
     assert!(
         memory
             .store()

@@ -485,6 +485,8 @@ impl Store {
         if deleting_meeting {
             database.deleted_meetings.insert(meeting_id);
             deleted.insert(meeting_id);
+            database.revision += 1;
+            return self.write(&database, PROFILES_FILE);
         }
         let is_target = |c: &Contribution| {
             c.meeting_id == meeting_id && speaker_id.is_none_or(|s| s == c.speaker_id)
@@ -582,5 +584,7 @@ fn contribution(
         } else {
             None
         },
+        meeting_title: Some(meeting.display_title()),
+        meeting_started_at: Some(meeting.started_at),
     }
 }

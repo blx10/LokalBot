@@ -181,7 +181,9 @@ actor MeetingSpeakerEvidenceStore {
         return SpeakerVoiceProfile.Contribution(meetingID: meeting.id, audioRevision: assignment.audioRevision,
             speakerID: assignment.id, decisionID: decisionID, confirmedAt: confirmedAt,
             samples: Array(samples.prefix(call ? 1 : 8)),
-            voiceprint: call ? SpeakerVoiceMatcher.voiceprint(samples)?.vector : nil)
+            voiceprint: call ? SpeakerVoiceMatcher.voiceprint(samples)?.vector : nil,
+            meetingTitle: meeting.displayTitle,
+            meetingStartedAt: meeting.startedAt)
     }
 
     private func add(_ contribution: SpeakerVoiceProfile.Contribution, name: String, isLocalUser: Bool?,
@@ -213,8 +215,16 @@ actor MeetingSpeakerEvidenceStore {
     }
 
     func revoke(meetingID: UUID, speakerID: UUID? = nil, deletingMeeting: Bool = false) throws {
+        if deletingMeeting {
+            deleted.insert(meetingID)
+            guard FileManager.default.fileExists(atPath: profilesURL.path) else { return }
+            var database = try profiles()
+            database.deletedMeetings.insert(meetingID)
+            database.revision += 1
+            try write(database, at: profilesURL)
+            return
+        }
         var database = try profiles()
-        if deletingMeeting { database.deletedMeetings.insert(meetingID); deleted.insert(meetingID) }
         for index in database.profiles.indices {
             let before = database.profiles[index].contributions.count
             database.revokedDecisionIDs.formUnion(database.profiles[index].contributions.filter {

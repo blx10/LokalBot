@@ -382,6 +382,21 @@ import XCTest
         XCTAssertEqual(live["them"]?.first?.name, "Alex")
     }
 
+    func testDeletingMeetingPreservesEnrolledProfileAndMeetingMetadata() async throws {
+        let (meeting, audio, transcript, turns, samples) = try fixture()
+        let processed = await service.process(transcript: transcript, meeting: meeting, turns: turns, samples: samples, audioURL: audio)
+        _ = try await service.choose(.init(label: "them", name: "Alex"), meeting: meeting, transcript: processed)
+        try await service.prepareDeletion(meeting: meeting)
+        try storage.deleteMeeting(meeting)
+
+        let profiles = try await service.profiles()
+        XCTAssertEqual(profiles.count, 1)
+        XCTAssertEqual(profiles[0].name, "Alex")
+        XCTAssertEqual(profiles[0].contributions.first?.meetingTitle, meeting.displayTitle)
+        XCTAssertEqual(profiles[0].contributions.first?.meetingStartedAt?.timeIntervalSince1970 ?? 0,
+                       meeting.startedAt.timeIntervalSince1970, accuracy: 0.01)
+    }
+
     func testNamesGivenBeforeCallVoicesWereRememberedSuggestNamesInRecentMeetings() async throws {
         let store = try service.store()
         let (older, olderAudio, olderTranscript, olderTurns, olderSamples) = try callFixture()

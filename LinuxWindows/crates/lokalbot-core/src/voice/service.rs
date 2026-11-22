@@ -925,7 +925,7 @@ impl VoiceMemory {
             .profiles
             .iter()
             .flat_map(|p| p.contributions.iter().map(|c| c.meeting_id))
-            .filter(|id| !kept.contains(id))
+            .filter(|id| !kept.contains(id) && !database.deleted_meetings.contains(id))
             .collect();
         for meeting_id in removed {
             if let Err(err) = store.revoke(meeting_id, None, true) {

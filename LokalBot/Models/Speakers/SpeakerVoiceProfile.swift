@@ -18,6 +18,8 @@ struct SpeakerVoiceProfile: Codable, Identifiable, Sendable {
         var confirmedAt: Date
         var samples: [SpeakerVoiceSample]
         var voiceprint: [Float]?
+        var meetingTitle: String?
+        var meetingStartedAt: Date?
     }
     var id = UUID()
     var name: String
