@@ -37,4 +37,4 @@ pub use wav::{
     SAMPLE_RATE, SampleEncoding, WavInfo, WavReader, WavWriter, duration_seconds, read_info,
     read_mono_16k, repair_wav, wav_bytes, write_wav, write_wav_16k,
 };
-pub use waveform::waveform_peaks;
+pub use waveform::{DETAIL_BUCKETS, resample_peaks, waveform_peaks};

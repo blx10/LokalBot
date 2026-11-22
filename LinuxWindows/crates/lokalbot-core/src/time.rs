@@ -215,6 +215,24 @@ pub fn stamp(seconds: f64) -> String {
     )
 }
 
+pub fn short_stamp(seconds: f64) -> String {
+    let total = if seconds.is_finite() {
+        seconds.max(0.0).floor() as u64
+    } else {
+        0
+    };
+    if total >= 3600 {
+        format!(
+            "{}:{:02}:{:02}",
+            total / 3600,
+            (total % 3600) / 60,
+            total % 60
+        )
+    } else {
+        format!("{}:{:02}", total / 60, total % 60)
+    }
+}
+
 pub fn parse_stamp(raw: &str) -> Option<f64> {
     let parts: Vec<&str> = raw.trim().split(':').collect();
     if parts.is_empty() || parts.len() > 3 {
@@ -283,6 +301,11 @@ mod tests {
     fn stamps_round_trip() {
         assert_eq!(stamp(26.9), "00:00:26");
         assert_eq!(stamp(3725.0), "01:02:05");
+        assert_eq!(short_stamp(2.9), "0:02");
+        assert_eq!(short_stamp(605.0), "10:05");
+        assert_eq!(short_stamp(3725.0), "1:02:05");
+        assert_eq!(short_stamp(-3.0), "0:00");
+        assert_eq!(short_stamp(f64::NAN), "0:00");
         assert_eq!(parse_stamp("01:02:05"), Some(3725.0));
         assert_eq!(parse_stamp("0:12"), Some(12.0));
         assert_eq!(parse_stamp("x"), None);

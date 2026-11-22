@@ -97,6 +97,8 @@ struct State {
     position: u64,
     stretch: Option<Wsola>,
     end_at: Option<u64>,
+    window_start: u64,
+    window_end: u64,
 }
 
 impl State {
@@ -117,17 +119,18 @@ impl State {
         if !self.playing {
             return;
         }
-        let end = self.end_at.unwrap_or(u64::MAX).min(self.mix.frames());
+        let upper = self.window_end.min(self.mix.frames());
+        let lower = self.window_start.min(upper);
+        let end = self.end_at.unwrap_or(upper).min(upper);
         if self.current_frame() >= end {
             self.playing = false;
             self.end_at = None;
-            let frame = end.min(self.mix.frames());
-            self.set_frame(frame);
+            self.set_frame(end.clamp(lower, upper));
             return;
         }
         match self.stretch.as_mut() {
             Some(wsola) => {
-                while out.len() < BLOCK {
+                while out.len() < BLOCK && (wsola.position().max(0.0) as u64) < end {
                     wsola.render(&mut self.mix, self.speed as f64, out);
                 }
             }
@@ -225,6 +228,7 @@ impl Player {
             block: Vec::new(),
         };
         let duration = mix.frames() as f64 / SAMPLE_RATE as f64;
+        let window_end = mix.frames();
         let state = State {
             mix,
             playing: false,
@@ -232,6 +236,8 @@ impl Player {
             position: 0,
             stretch: None,
             end_at: None,
+            window_start: 0,
+            window_end,
         };
         Ok(Player {
             state: Arc::new(Mutex::new(state)),
@@ -282,13 +288,20 @@ impl Player {
 
     pub fn play(&self) -> Result<()> {
         self.ensure_output()?;
+        self.play_in_state();
+        Ok(())
+    }
+
+    fn play_in_state(&self) {
         let mut state = self.state.lock();
         state.end_at = None;
-        if state.current_frame() >= state.mix.frames() {
-            state.set_frame(0);
+        let upper = state.window_end.min(state.mix.frames());
+        let lower = state.window_start.min(upper);
+        let cur = state.current_frame();
+        if cur < lower || cur >= upper {
+            state.set_frame(lower);
         }
         state.playing = true;
-        Ok(())
     }
 
     pub fn play_range(&self, start: f64, end: f64) -> Result<()> {
@@ -296,11 +309,23 @@ impl Player {
             bail!("invalid passage");
         }
         self.ensure_output()?;
+        self.play_range_in_state(start, end)
+    }
+
+    fn play_range_in_state(&self, start: f64, end: f64) -> Result<()> {
+        if !(start.is_finite() && end.is_finite() && end > start) {
+            bail!("invalid passage");
+        }
         let mut state = self.state.lock();
-        let frames = state.mix.frames();
-        let start = ((start.max(0.0) * SAMPLE_RATE as f64) as u64).min(frames);
+        let upper = state.window_end.min(state.mix.frames());
+        let lower = state.window_start.min(upper);
+        let start = ((start.max(0.0) * SAMPLE_RATE as f64).round() as u64).clamp(lower, upper);
+        let end = ((end.max(0.0) * SAMPLE_RATE as f64).round() as u64).clamp(lower, upper);
+        if end <= start {
+            bail!("invalid passage");
+        }
         state.set_frame(start);
-        state.end_at = Some(((end * SAMPLE_RATE as f64) as u64).min(frames));
+        state.end_at = Some(end);
         state.playing = true;
         Ok(())
     }
@@ -322,13 +347,60 @@ impl Player {
 
     pub fn seek(&self, seconds: f64) {
         let mut state = self.state.lock();
-        let frames = state.mix.frames();
+        let upper = state.window_end.min(state.mix.frames());
+        let lower = state.window_start.min(upper);
         let frame = if seconds.is_finite() {
-            ((seconds.max(0.0) * SAMPLE_RATE as f64) as u64).min(frames)
+            ((seconds.max(0.0) * SAMPLE_RATE as f64).round() as u64).clamp(lower, upper)
         } else {
-            0
+            lower
         };
         state.set_frame(frame);
+    }
+
+    pub fn set_playback_range(&self, range: Option<(f64, f64)>) {
+        let mut state = self.state.lock();
+        let frames = state.mix.frames();
+        let raw = frames as f64 / SAMPLE_RATE as f64;
+        if let Some((start, end)) = range
+            && start.is_finite()
+            && end.is_finite()
+            && start >= 0.0
+            && end > start
+            && frames > 0
+            && start < raw
+        {
+            let start_frame = ((start * SAMPLE_RATE as f64).round() as u64).min(frames);
+            let min_end = (((start + 0.05) * SAMPLE_RATE as f64).round() as u64).min(frames);
+            let end_frame = ((end * SAMPLE_RATE as f64).round() as u64)
+                .max(min_end)
+                .min(frames);
+            state.window_start = start_frame;
+            state.window_end = end_frame.max(start_frame);
+        } else {
+            state.window_start = 0;
+            state.window_end = frames;
+        }
+        let cur = state.current_frame();
+        if cur < state.window_start || cur > state.window_end {
+            if state.playing && cur >= state.window_end {
+                state.playing = false;
+                state.end_at = None;
+            }
+            let clamped = cur.clamp(state.window_start, state.window_end);
+            state.set_frame(clamped);
+        }
+    }
+
+    pub fn window_start(&self) -> f64 {
+        self.state.lock().window_start as f64 / SAMPLE_RATE as f64
+    }
+
+    pub fn window_end(&self) -> f64 {
+        self.state.lock().window_end as f64 / SAMPLE_RATE as f64
+    }
+
+    pub fn raw_duration(&self) -> f64 {
+        self.duration
     }
 
     pub fn set_speed(&self, speed: f32) {
@@ -426,5 +498,95 @@ mod tests {
         assert!((fast.len() as i64 - 32_000).abs() < 1_000, "{}", fast.len());
         player.set_speed(5.0);
         assert_eq!(player.speed(), MAX_SPEED);
+    }
+
+    #[test]
+    fn set_playback_range_clamps_seek_position_and_restores_full_range() {
+        let (_dir, player) = player_with(&vec![0.25; 16_000 * 2], &vec![0.0; 16_000 * 2]);
+        assert!((player.raw_duration() - 2.0).abs() < 1e-9);
+        assert!((player.duration() - 2.0).abs() < 1e-9);
+        assert!((player.window_start() - 0.0).abs() < 1e-9);
+        assert!((player.window_end() - 2.0).abs() < 1e-9);
+
+        player.set_playback_range(Some((0.5, 1.5)));
+        assert!((player.window_start() - 0.5).abs() < 1e-9);
+        assert!((player.window_end() - 1.5).abs() < 1e-9);
+        assert!((player.position() - 0.5).abs() < 1e-9);
+
+        player.seek(0.1);
+        assert!((player.position() - 0.5).abs() < 1e-9);
+        player.seek(1.9);
+        assert!((player.position() - 1.5).abs() < 1e-9);
+        player.seek(f64::NAN);
+        assert!((player.position() - 0.5).abs() < 1e-9);
+
+        player.set_playback_range(None);
+        assert!((player.window_start() - 0.0).abs() < 1e-9);
+        assert!((player.window_end() - 2.0).abs() < 1e-9);
+        player.seek(0.1);
+        assert!((player.position() - 0.1).abs() < 1e-9);
+    }
+
+    #[test]
+    fn playback_stops_at_window_end_and_play_restarts_from_window_start() {
+        let (_dir, player) = player_with(&vec![0.25; 16_000 * 2], &vec![0.0; 16_000 * 2]);
+        player.set_playback_range(Some((0.5, 1.2)));
+        player.play_in_state();
+        let out = drain(&player, 1_000);
+        assert_eq!(out.len(), 11_200);
+        assert!(!player.is_playing());
+        assert!((player.position() - 1.2).abs() < 1e-9);
+
+        player.play_in_state();
+        assert!((player.position() - 0.5).abs() < 1e-9);
+        let out2 = drain(&player, 1_000);
+        assert_eq!(out2.len(), 11_200);
+    }
+
+    #[test]
+    fn set_playback_range_minimum_window_and_invalid_ranges() {
+        let (_dir, player) = player_with(&vec![0.25; 16_000 * 2], &vec![0.0; 16_000 * 2]);
+        player.set_playback_range(Some((0.5, 0.51)));
+        assert!((player.window_start() - 0.5).abs() < 1e-9);
+        assert!((player.window_end() - 0.55).abs() < 1e-9);
+
+        for invalid in [
+            (-1.0, 1.0),
+            (1.5, 1.0),
+            (5.0, 6.0),
+            (f64::NAN, 1.0),
+            (0.5, f64::INFINITY),
+        ] {
+            player.set_playback_range(Some(invalid));
+            assert!((player.window_start() - 0.0).abs() < 1e-9, "{invalid:?}");
+            assert!((player.window_end() - 2.0).abs() < 1e-9, "{invalid:?}");
+        }
+    }
+
+    #[test]
+    fn play_range_respects_untrimmed_and_bounded_windows() {
+        let (_dir, player) = player_with(&vec![0.25; 16_000 * 2], &vec![0.0; 16_000 * 2]);
+        player.play_range_in_state(0.2, 0.8).unwrap();
+        let untrimmed = drain(&player, 1_000);
+        assert_eq!(untrimmed.len(), 9_600);
+        assert!((player.position() - 0.8).abs() < 1e-9);
+
+        player.set_playback_range(Some((0.5, 1.0)));
+        player.play_range_in_state(0.7, 1.5).unwrap();
+        let bounded = drain(&player, 1_000);
+        assert_eq!(bounded.len(), 4_800);
+        assert!((player.position() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn speed_playback_stops_at_window_end() {
+        let (_dir, player) = player_with(&vec![0.25; 16_000 * 3], &vec![0.0; 16_000 * 3]);
+        player.set_playback_range(Some((0.5, 1.5)));
+        player.set_speed(1.5);
+        player.play_in_state();
+        let fast = drain(&player, 1_000);
+        assert!(!player.is_playing());
+        assert!((player.position() - 1.5).abs() < 1e-9);
+        assert!(fast.len() > 8_000 && fast.len() < 14_000, "{}", fast.len());
     }
 }

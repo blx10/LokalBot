@@ -3,6 +3,7 @@ use std::path::Path;
 
 use anyhow::Result;
 use chrono::{DateTime, Duration, Utc};
+use lokalbot_core::extract::{self, ExtractError};
 use lokalbot_core::merge::{self, MergeError, MergeResult, Slice, UndoError};
 use lokalbot_core::{ContentRange, Library, Meeting};
 use uuid::Uuid;
@@ -276,14 +277,50 @@ pub fn undo_merge(library: &Library, merged: &Meeting) -> Result<Vec<Meeting>, U
     Ok(restored)
 }
 
+fn longest_track_duration(library: &Library, meeting: &Meeting) -> Option<f64> {
+    let audio = library.audio(meeting);
+    [audio.mic, audio.system]
+        .into_iter()
+        .flatten()
+        .filter_map(|path| {
+            lokalbot_audio::TrackReader::open(&path)
+                .ok()
+                .map(|reader| reader.duration_seconds())
+        })
+        .filter(|d| d.is_finite() && *d > 0.0)
+        .reduce(f64::max)
+}
+
 pub fn set_meeting_boundaries(
     library: &Library,
     meeting: &Meeting,
     range: ContentRange,
 ) -> Result<Meeting> {
-    let updated = library.set_meeting_boundaries(meeting, range)?;
+    let audio_duration = longest_track_duration(library, meeting);
+    let updated = library.set_meeting_boundaries_with_duration(meeting, range, audio_duration)?;
     library.reindex_meeting(&updated)?;
     Ok(updated)
+}
+
+pub fn extract_meeting_from_selection(
+    library: &Library,
+    meeting: &Meeting,
+    range: ContentRange,
+) -> Result<Meeting, ExtractError> {
+    let audio_duration = longest_track_duration(library, meeting);
+    let splice = |slices: &[Slice], dest: &Path| {
+        let parts: Vec<lokalbot_audio::SplicePart<'_>> = slices
+            .iter()
+            .map(|s| (s.source.as_deref(), s.start, s.end))
+            .collect();
+        lokalbot_audio::splice_tracks(&parts, dest)
+    };
+    let created =
+        extract::extract_meeting_from_selection(library, meeting, range, audio_duration, &splice)?;
+    if let Err(err) = library.reindex_meeting(&created) {
+        log::warn!("indexing the extracted meeting failed: {err:#}");
+    }
+    Ok(created)
 }
 
 #[cfg(test)]
@@ -747,5 +784,93 @@ mod tests {
         expected.sort();
         assert_eq!(visible, expected);
         assert!(!library.meeting_dir(merged).exists());
+    }
+
+    #[test]
+    fn extract_slices_audio_transcript_and_indexes_search_without_mutating_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let library = Library::open(LibraryPaths::new(dir.path().join("library"))).unwrap();
+        let started = Utc::now() - Duration::minutes(10);
+        let mut source = library
+            .create_meeting("Design Sync", "Zoom", started)
+            .unwrap();
+        let folder = library.meeting_dir(&source);
+        write_tone(&folder.join("mic.wav"), 6.0, 16_000, 1);
+        write_tone(&folder.join("system.wav"), 6.0, 44_100, 2);
+        source.ended_at = Some(started + Duration::seconds(6));
+        source.recorded_duration = Some(6.0);
+        source.has_system_track = true;
+        library.save_meeting(&source).unwrap();
+
+        let mut transcript = lokalbot_core::Transcript {
+            engine: "whisper".into(),
+            segments: vec![
+                serde_json::from_value(serde_json::json!({
+                    "start": 0.5, "end": 1.2, "speaker": "me", "text": "Intro skipped"
+                }))
+                .unwrap(),
+                serde_json::from_value(serde_json::json!({
+                    "start": 1.8, "end": 3.5, "speaker": "them", "text": "Kafka migration plan"
+                }))
+                .unwrap(),
+                serde_json::from_value(serde_json::json!({
+                    "start": 4.5, "end": 5.8, "speaker": "them 2", "text": "Outro skipped"
+                }))
+                .unwrap(),
+            ],
+            ..Default::default()
+        };
+        transcript
+            .speaker_aliases
+            .insert("them".into(), "Maya".into());
+        transcript
+            .speaker_aliases
+            .insert("them 2".into(), "Dan".into());
+        library.save_transcript(&source, &transcript).unwrap();
+        library.save_notes(&source, "Review action items").unwrap();
+
+        let created = extract_meeting_from_selection(
+            &library,
+            &source,
+            ContentRange {
+                start: 2.0,
+                end: 4.0,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(created.title, "Design Sync (0:02–0:04)");
+        assert_eq!(created.extracted_from_meeting_id, Some(source.id));
+        assert!(created.has_system_track);
+        assert!((created.recorded_duration.unwrap() - 2.0).abs() < 0.05);
+
+        let audio = library.audio(&created);
+        let mic_dur = lokalbot_audio::duration_seconds(audio.mic.as_ref().unwrap()).unwrap();
+        let sys_dur = lokalbot_audio::duration_seconds(audio.system.as_ref().unwrap()).unwrap();
+        assert!((mic_dur - 2.0).abs() < 0.05, "{mic_dur}");
+        assert!((sys_dur - 2.0).abs() < 0.05, "{sys_dur}");
+
+        let sliced = library.transcript(&created).unwrap().unwrap();
+        assert_eq!(sliced.segments.len(), 1);
+        assert_eq!(sliced.segments[0].text, "Kafka migration plan");
+        assert!((sliced.segments[0].start - 0.0).abs() < 1e-9);
+        assert!((sliced.segments[0].end - 1.5).abs() < 1e-9);
+        assert_eq!(sliced.speaker_aliases.len(), 1);
+        assert_eq!(sliced.speaker_aliases["them"], "Maya");
+
+        let hits = library.matching_meeting_ids("Kafka").unwrap();
+        assert!(hits.contains(&created.id));
+
+        let restored = set_meeting_boundaries(
+            &library,
+            &created,
+            ContentRange {
+                start: 0.0,
+                end: 2.0,
+            },
+        )
+        .unwrap();
+        assert_eq!(restored.content_range, None);
+        assert_eq!(restored.content_range_source, None);
     }
 }

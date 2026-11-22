@@ -388,6 +388,19 @@ fn is_blank_page(moment: &Moment) -> bool {
         && is_browser(&moment.app)
 }
 
+fn screen_row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScreenRow> {
+    let ts: f64 = row.get(1)?;
+    Ok(ScreenRow {
+        id: row.get(0)?,
+        ts: DateTime::from_timestamp_millis((ts * 1000.0) as i64).unwrap_or_default(),
+        path: row.get(2)?,
+        app: row.get(3)?,
+        window_title: row.get(4)?,
+        source_url: row.get(5)?,
+        document_name: row.get(6)?,
+    })
+}
+
 impl Library {
     pub fn meeting_screenshots(
         &self,
@@ -399,33 +412,31 @@ impl Library {
             return Ok(Vec::new());
         }
         let id = crate::ids::uuid_upper(&meeting.id);
+        let parent_id = meeting
+            .extracted_from_meeting_id
+            .map(|parent| crate::ids::uuid_upper(&parent));
+        let from_secs = from.timestamp_millis() as f64 / 1000.0;
+        let to_secs = to.timestamp_millis() as f64 / 1000.0;
         self.with_db(|db| {
-            let mut statement = db.prepare(
-                "SELECT id, ts, path, app, window_title, source_url, document_name FROM screenshots \
-                 WHERE ts >= ?2 AND ts <= ?3 AND (meeting_id = ?1 OR meeting_id = '') \
-                 ORDER BY ts, id",
-            )?;
-            let rows = statement.query_map(
-                params![
-                    id,
-                    from.timestamp_millis() as f64 / 1000.0,
-                    to.timestamp_millis() as f64 / 1000.0
-                ],
-                |row| {
-                    let ts: f64 = row.get(1)?;
-                    Ok(ScreenRow {
-                        id: row.get(0)?,
-                        ts: DateTime::from_timestamp_millis((ts * 1000.0) as i64)
-                            .unwrap_or_default(),
-                        path: row.get(2)?,
-                        app: row.get(3)?,
-                        window_title: row.get(4)?,
-                        source_url: row.get(5)?,
-                        document_name: row.get(6)?,
-                    })
-                },
-            )?;
-            Ok(rows.filter_map(Result::ok).collect())
+            let collected: Vec<ScreenRow> = if let Some(parent_id) = parent_id {
+                let mut statement = db.prepare(
+                    "SELECT id, ts, path, app, window_title, source_url, document_name FROM screenshots \
+                     WHERE ts >= ?2 AND ts <= ?3 AND (meeting_id = ?1 OR meeting_id = ?4 OR meeting_id = '') \
+                     ORDER BY ts, id",
+                )?;
+                let rows =
+                    statement.query_map(params![id, from_secs, to_secs, parent_id], screen_row_from_sql)?;
+                rows.filter_map(Result::ok).collect()
+            } else {
+                let mut statement = db.prepare(
+                    "SELECT id, ts, path, app, window_title, source_url, document_name FROM screenshots \
+                     WHERE ts >= ?2 AND ts <= ?3 AND (meeting_id = ?1 OR meeting_id = '') \
+                     ORDER BY ts, id",
+                )?;
+                let rows = statement.query_map(params![id, from_secs, to_secs], screen_row_from_sql)?;
+                rows.filter_map(Result::ok).collect()
+            };
+            Ok(collected)
         })
     }
 
@@ -583,5 +594,53 @@ mod tests {
         assert_eq!(page.title, "Inbox");
         assert_eq!(page.site.as_deref(), Some("Gmail"));
         assert_eq!(splitting_site("Plain title").title, "Plain title");
+    }
+
+    #[test]
+    fn extracted_child_meeting_includes_parent_screenshots() {
+        let dir = tempfile::tempdir().unwrap();
+        let library = Library::open(crate::paths::LibraryPaths::new(dir.path())).unwrap();
+        let parent = meeting();
+        let mut child = meeting();
+        child.id = uuid::Uuid::new_v4();
+        child.extracted_from_meeting_id = Some(parent.id);
+        child.started_at = parent.started_at + Duration::seconds(60);
+        child.ended_at = Some(child.started_at + Duration::seconds(120));
+        child.recorded_duration = Some(120.0);
+
+        let unrelated_id = crate::ids::uuid_upper(&uuid::Uuid::new_v4());
+        let parent_id = crate::ids::uuid_upper(&parent.id);
+        let child_id = crate::ids::uuid_upper(&child.id);
+        let parent_ts =
+            (parent.started_at + Duration::seconds(90)).timestamp_millis() as f64 / 1000.0;
+        let child_ts =
+            (parent.started_at + Duration::seconds(100)).timestamp_millis() as f64 / 1000.0;
+        library
+            .with_db(|db| {
+                db.execute(
+                    "INSERT INTO screenshots(ts, path, app, window_title, source_url, meeting_id) VALUES (?1, 'p.jpg', 'Google Chrome', 'Roadmap - Google Docs', 'https://docs.google.com/document/d/abc', ?2)",
+                    params![parent_ts, parent_id],
+                )?;
+                db.execute(
+                    "INSERT INTO screenshots(ts, path, app, window_title, source_url, meeting_id) VALUES (?1, 'c.jpg', 'Editor', 'notes.md', '', ?2)",
+                    params![child_ts, child_id],
+                )?;
+                db.execute(
+                    "INSERT INTO screenshots(ts, path, app, window_title, source_url, meeting_id) VALUES (?1, 'u.jpg', 'Editor', 'secret.rs', '', ?2)",
+                    params![child_ts, unrelated_id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let rows = library
+            .meeting_screenshots(
+                &child,
+                child.started_at - Duration::seconds(5),
+                child.ended_at.unwrap() + Duration::seconds(5),
+            )
+            .unwrap();
+        let titles: Vec<&str> = rows.iter().map(|r| r.window_title.as_str()).collect();
+        assert_eq!(titles, ["Roadmap - Google Docs", "notes.md"]);
     }
 }

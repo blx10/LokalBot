@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 use crate::decode::TrackReader;
 
 const CACHE_FILE: &str = ".waveform-peaks.json";
+const DETAIL_CACHE_FILE: &str = ".waveform-peaks-detail-v1.json";
 const CACHE_LIMIT_BYTES: u64 = 1 << 20;
+pub const DETAIL_BUCKETS: usize = 16_384;
 
 #[derive(Serialize, Deserialize)]
 struct CacheEntry {
@@ -24,7 +26,7 @@ pub fn waveform_peaks(paths: &[&Path], buckets: usize) -> Result<Vec<f32>> {
         bail!("no audio to draw");
     }
     let key = cache_key(&paths, buckets);
-    let cache = cache_path(&paths);
+    let cache = cache_path(&paths, buckets);
     if let (Some(cache), Some(key)) = (&cache, &key)
         && let Some(peaks) = read_cache(cache, key, buckets)
     {
@@ -36,7 +38,9 @@ pub fn waveform_peaks(paths: &[&Path], buckets: usize) -> Result<Vec<f32>> {
             key,
             peaks: peaks.clone(),
         };
-        if let Ok(json) = serde_json::to_vec(&entry) {
+        if let Ok(json) = serde_json::to_vec(&entry)
+            && json.len() as u64 <= CACHE_LIMIT_BYTES
+        {
             let tmp = cache.with_extension("json.tmp");
             if std::fs::write(&tmp, json).is_ok() && std::fs::rename(&tmp, &cache).is_err() {
                 let _ = std::fs::remove_file(&tmp);
@@ -46,12 +50,64 @@ pub fn waveform_peaks(paths: &[&Path], buckets: usize) -> Result<Vec<f32>> {
     Ok(peaks)
 }
 
-fn cache_path(paths: &[&Path]) -> Option<PathBuf> {
+pub fn resample_peaks(
+    peaks: &[f32],
+    duration: f64,
+    visible_start: f64,
+    visible_end: f64,
+    width: f64,
+) -> Vec<f32> {
+    if peaks.is_empty()
+        || !duration.is_finite()
+        || duration <= 0.0
+        || !visible_start.is_finite()
+        || !visible_end.is_finite()
+        || visible_end <= visible_start
+        || !width.is_finite()
+        || width <= 0.0
+    {
+        return Vec::new();
+    }
+    let start_ratio = (visible_start / duration).clamp(0.0, 1.0);
+    let end_ratio = (visible_end / duration).clamp(0.0, 1.0);
+    if end_ratio <= start_ratio {
+        return Vec::new();
+    }
+    let start_index = ((start_ratio * peaks.len() as f64).floor() as usize).min(peaks.len() - 1);
+    let end_index = ((end_ratio * peaks.len() as f64).ceil() as usize)
+        .max(start_index + 1)
+        .min(peaks.len());
+    let slice_len = end_index - start_index;
+    let count = ((width / 4.0).floor().min(slice_len as f64) as usize)
+        .max(1)
+        .min(slice_len);
+    (0..count)
+        .map(|index| {
+            let lo = start_index + index * slice_len / count;
+            let hi = (start_index + (index + 1) * slice_len / count)
+                .max(lo + 1)
+                .min(end_index);
+            peaks[lo..hi]
+                .iter()
+                .copied()
+                .filter(|p| p.is_finite())
+                .fold(0.0f32, f32::max)
+                .clamp(0.0, 1.0)
+        })
+        .collect()
+}
+
+fn cache_path(paths: &[&Path], buckets: usize) -> Option<PathBuf> {
     let folder = paths.first()?.parent()?;
+    let file = if buckets == DETAIL_BUCKETS {
+        DETAIL_CACHE_FILE
+    } else {
+        CACHE_FILE
+    };
     paths
         .iter()
         .all(|p| p.parent() == Some(folder))
-        .then(|| folder.join(CACHE_FILE))
+        .then(|| folder.join(file))
 }
 
 fn cache_key(paths: &[&Path], buckets: usize) -> Option<String> {
@@ -158,5 +214,66 @@ mod tests {
         assert!(dir.path().join(CACHE_FILE).is_file());
         assert_eq!(waveform_peaks(&[&mic, &system], 8).unwrap(), peaks);
         assert_eq!(waveform_peaks(&[&mic, &system], 4).unwrap().len(), 4);
+    }
+
+    #[test]
+    fn detail_peaks_use_separate_detail_cache_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mic = dir.path().join("mic.wav");
+        let mut mic_samples = vec![0.8f32; 8_000];
+        mic_samples.extend(vec![0.1f32; 24_000]);
+        write_wav_16k(&mic, &mic_samples).unwrap();
+
+        let peaks = waveform_peaks(&[&mic], DETAIL_BUCKETS).unwrap();
+        assert_eq!(peaks.len(), DETAIL_BUCKETS);
+        let detail_cache = dir.path().join(DETAIL_CACHE_FILE);
+        assert!(detail_cache.is_file());
+        assert!(std::fs::metadata(&detail_cache).unwrap().len() <= CACHE_LIMIT_BYTES);
+        assert!(!dir.path().join(CACHE_FILE).exists());
+        assert_eq!(waveform_peaks(&[&mic], DETAIL_BUCKETS).unwrap(), peaks);
+    }
+
+    #[test]
+    fn detail_cache_rejects_oversized_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mic = dir.path().join("mic.wav");
+        write_wav_16k(&mic, &vec![0.5f32; 16_000]).unwrap();
+        let detail_cache = dir.path().join(DETAIL_CACHE_FILE);
+        let oversized = vec![b' '; (CACHE_LIMIT_BYTES + 16) as usize];
+        std::fs::write(&detail_cache, oversized).unwrap();
+
+        let peaks = waveform_peaks(&[&mic], DETAIL_BUCKETS).unwrap();
+        assert_eq!(peaks.len(), DETAIL_BUCKETS);
+        assert!(peaks.iter().all(|p| p.is_finite() && *p >= 0.0));
+    }
+
+    #[test]
+    fn resample_peaks_covers_visible_slice_and_handles_edge_cases() {
+        let mut peaks = vec![0.0f32; DETAIL_BUCKETS];
+        let target = (DETAIL_BUCKETS * 3) / 4;
+        peaks[target] = 1.0;
+
+        let full = resample_peaks(&peaks, 100.0, 0.0, 100.0, 400.0);
+        assert_eq!(full.len(), 100);
+        assert_eq!(full.iter().copied().fold(0.0f32, f32::max), 1.0);
+
+        let early = resample_peaks(&peaks, 100.0, 0.0, 50.0, 400.0);
+        assert_eq!(early.iter().copied().fold(0.0f32, f32::max), 0.0);
+
+        let zoomed = resample_peaks(&peaks, 100.0, 70.0, 80.0, 400.0);
+        assert_eq!(zoomed.iter().copied().fold(0.0f32, f32::max), 1.0);
+
+        let clamped = resample_peaks(&peaks, 100.0, -20.0, 150.0, 200.0);
+        assert_eq!(clamped.len(), 50);
+        assert_eq!(clamped.iter().copied().fold(0.0f32, f32::max), 1.0);
+
+        let narrow = resample_peaks(&[0.2, 0.9, 0.3, 0.4], 4.0, 0.0, 2.0, 400.0);
+        assert_eq!(narrow, vec![0.2, 0.9]);
+
+        assert!(resample_peaks(&[], 10.0, 0.0, 10.0, 100.0).is_empty());
+        assert!(resample_peaks(&peaks, 0.0, 0.0, 10.0, 100.0).is_empty());
+        assert!(resample_peaks(&peaks, 10.0, 5.0, 5.0, 100.0).is_empty());
+        assert!(resample_peaks(&peaks, 10.0, 0.0, 10.0, 0.0).is_empty());
+        assert!(resample_peaks(&peaks, f64::NAN, 0.0, 10.0, 100.0).is_empty());
     }
 }

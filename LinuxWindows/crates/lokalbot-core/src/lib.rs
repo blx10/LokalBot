@@ -17,6 +17,7 @@ pub mod dream;
 pub mod due;
 pub mod embeddings;
 pub mod evidence;
+pub mod extract;
 pub mod files;
 pub mod generated_file;
 pub mod github_star;

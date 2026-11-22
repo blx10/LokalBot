@@ -72,6 +72,13 @@ pub struct Meeting {
         rename = "mergedIntoMeetingID"
     )]
     pub merged_into_meeting_id: Option<Uuid>,
+    #[serde(
+        default,
+        with = "uuid_upper_serde::option",
+        skip_serializing_if = "Option::is_none",
+        rename = "extractedFromMeetingID"
+    )]
+    pub extracted_from_meeting_id: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub imported_file_names: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -175,6 +182,7 @@ impl Meeting {
             calendar_agenda: None,
             merged_source_meeting_ids: None,
             merged_into_meeting_id: None,
+            extracted_from_meeting_id: None,
             imported_file_names: None,
             recorded_duration: None,
             content_range: None,
@@ -214,8 +222,8 @@ impl Meeting {
     }
 
     pub fn additional_saved_audio_duration(&self) -> f64 {
-        match (&self.content_range, self.recorded_duration) {
-            (Some(range), Some(recorded)) => (recorded - range.end).max(0.0),
+        match (self.valid_content_range(), self.recorded_duration) {
+            (Some(range), Some(recorded)) => range.start.max(0.0) + (recorded - range.end).max(0.0),
             _ => 0.0,
         }
     }
@@ -264,5 +272,43 @@ impl Meeting {
 
     pub fn short_id(&self) -> String {
         crate::ids::short_id(&self.id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracted_from_meeting_id_round_trips_as_uppercase_uuid() {
+        let mut meeting = Meeting::new("Clip", "Zoom", crate::time::now_seconds(), "meetings/x");
+        let parent = Uuid::new_v4();
+        meeting.extracted_from_meeting_id = Some(parent);
+        let json = serde_json::to_value(&meeting).unwrap();
+        assert_eq!(
+            json["extractedFromMeetingID"],
+            crate::ids::uuid_upper(&parent)
+        );
+        let decoded: Meeting = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded.extracted_from_meeting_id, Some(parent));
+    }
+
+    #[test]
+    fn additional_saved_audio_duration_counts_leading_and_trailing_trim() {
+        let mut meeting = Meeting::new("Call", "Zoom", crate::time::now_seconds(), "meetings/x");
+        meeting.recorded_duration = Some(100.0);
+        assert_eq!(meeting.additional_saved_audio_duration(), 0.0);
+
+        meeting.content_range = Some(ContentRange {
+            start: 12.5,
+            end: 80.0,
+        });
+        assert!((meeting.additional_saved_audio_duration() - 32.5).abs() < 1e-9);
+
+        meeting.content_range = Some(ContentRange {
+            start: 50.0,
+            end: 50.0,
+        });
+        assert_eq!(meeting.additional_saved_audio_duration(), 0.0);
     }
 }

@@ -319,7 +319,7 @@ pub fn load(library: &Library, meeting: Meeting) -> MeetingDoc {
         .flatten()
         .collect();
     let peaks = (!tracks.is_empty())
-        .then(|| lokalbot_audio::waveform_peaks(&tracks, 720))
+        .then(|| lokalbot_audio::waveform_peaks(&tracks, lokalbot_audio::DETAIL_BUCKETS))
         .and_then(|result| {
             result
                 .map_err(|err| log::warn!("waveform for {}: {err:#}", meeting.id))

@@ -272,22 +272,55 @@ impl Library {
         meeting: &Meeting,
         range: ContentRange,
     ) -> Result<Meeting> {
+        self.set_meeting_boundaries_with_duration(meeting, range, None)
+    }
+
+    pub fn set_meeting_boundaries_with_duration(
+        &self,
+        meeting: &Meeting,
+        range: ContentRange,
+        audio_duration: Option<f64>,
+    ) -> Result<Meeting> {
         if self.is_read_only() {
             bail!("the library is open read-only");
         }
-        let duration = meeting.duration_seconds();
-        if meeting.is_live() || !range.is_valid() || range.end > duration + 0.001 {
+        let duration = meeting
+            .recorded_duration
+            .unwrap_or(0.0)
+            .max(audio_duration.unwrap_or(0.0))
+            .max(meeting.duration_seconds());
+        if meeting.is_live()
+            || !range.is_valid()
+            || !duration.is_finite()
+            || duration <= 0.0
+            || range.start >= duration
+            || range.end > duration + 0.05
+        {
             bail!(BoundaryError);
         }
+        let clamped_end = range.end.min(duration);
+        if clamped_end <= range.start {
+            bail!(BoundaryError);
+        }
+        let effective_range = if range.start <= 0.05 && clamped_end >= duration - 0.05 {
+            None
+        } else {
+            Some(ContentRange {
+                start: range.start,
+                end: clamped_end,
+            })
+        };
         let mut updated = meeting.clone();
-        updated.content_range = Some(range);
-        updated.content_range_source = Some(ContentRangeSource::UserReviewed);
+        updated.content_range = effective_range;
+        updated.content_range_source = effective_range.map(|_| ContentRangeSource::UserReviewed);
         let dir = self.meeting_dir(&updated);
         let transcript = self.transcript(meeting)?;
         crate::evidence::with_meeting_removal(self.paths().root(), &[meeting], || {
             invalidate_generated_notes(&dir)?;
             if let Some(mut transcript) = transcript {
-                range.apply(&mut transcript);
+                if let Some(range) = effective_range {
+                    range.apply(&mut transcript);
+                }
                 write_json(&dir.join(TRANSCRIPT_FILE), &transcript)?;
                 write_atomic(
                     &dir.join(TRANSCRIPT_MD_FILE),
@@ -1257,6 +1290,85 @@ mod tests {
         assert_eq!(library.list_meetings().unwrap().len(), 1);
         assert!(
             matches!(library.find_meeting("latest").unwrap(), MeetingLookup::Found(m) if m.id == second.id)
+        );
+    }
+
+    #[test]
+    fn boundaries_clamp_with_tolerance_and_clear_on_full_restore() {
+        let dir = tempfile::tempdir().unwrap();
+        let library = Library::open(LibraryPaths::new(dir.path())).unwrap();
+        let started = crate::time::now_seconds() - chrono::Duration::seconds(30);
+        let mut meeting = library
+            .create_meeting("Trim Test", "Zoom", started)
+            .unwrap();
+        meeting.ended_at = Some(started + chrono::Duration::seconds(10));
+        meeting.recorded_duration = Some(10.0);
+        library.save_meeting(&meeting).unwrap();
+
+        let trimmed = library
+            .set_meeting_boundaries_with_duration(
+                &meeting,
+                ContentRange {
+                    start: 2.0,
+                    end: 10.03,
+                },
+                Some(10.0),
+            )
+            .unwrap();
+        assert_eq!(
+            trimmed.content_range,
+            Some(ContentRange {
+                start: 2.0,
+                end: 10.0
+            })
+        );
+        assert_eq!(
+            trimmed.content_range_source,
+            Some(ContentRangeSource::UserReviewed)
+        );
+
+        let restored = library
+            .set_meeting_boundaries_with_duration(
+                &trimmed,
+                ContentRange {
+                    start: 0.02,
+                    end: 9.98,
+                },
+                Some(10.0),
+            )
+            .unwrap();
+        assert_eq!(restored.content_range, None);
+        assert_eq!(restored.content_range_source, None);
+
+        let extended = library
+            .set_meeting_boundaries_with_duration(
+                &restored,
+                ContentRange {
+                    start: 1.0,
+                    end: 12.0,
+                },
+                Some(15.0),
+            )
+            .unwrap();
+        assert_eq!(
+            extended.content_range,
+            Some(ContentRange {
+                start: 1.0,
+                end: 12.0
+            })
+        );
+
+        assert!(
+            library
+                .set_meeting_boundaries_with_duration(
+                    &restored,
+                    ContentRange {
+                        start: 1.0,
+                        end: 16.0,
+                    },
+                    Some(15.0),
+                )
+                .is_err()
         );
     }
 }

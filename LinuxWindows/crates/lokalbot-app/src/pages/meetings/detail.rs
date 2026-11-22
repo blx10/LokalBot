@@ -358,114 +358,268 @@ impl MeetingsPage {
                 )
                 .into_any_element();
         }
-        let (current, duration) = self.playback_times(doc.meeting.duration_seconds());
+        let (current, active_end, raw_duration) =
+            self.playback_times(doc.meeting.duration_seconds());
         let caption = caption_at(doc, current);
+        let is_busy = self.selection_busy || self.data.read(cx).is_processing(doc.meeting.id);
+        let has_trimmed_boundaries = doc.meeting.valid_content_range().is_some();
+        let scrub_progress = match self.waveform_drag {
+            Some((crate::ui::waveform::WaveformDrag::Scrub, frac)) => Some(frac),
+            _ => None,
+        };
         let page = cx.entity().downgrade();
         let hover_page = page.clone();
-        let speed_target = page.clone();
+        let down_page = page.clone();
+        let move_page = page.clone();
+        let up_page = page.clone();
+        let zoom_page = page.clone();
+        let pan_page = page.clone();
+        let reset_page = page.clone();
+        let clear_page = page.clone();
+        let trim_page = page.clone();
+        let extract_page = page.clone();
+        let restore_page = page.clone();
+        let speed_target = page;
         let speed = self.speed;
         let waveform = crate::ui::waveform::waveform(
             "meeting-waveform",
-            doc.peaks.clone(),
-            self.playhead,
-            self.hover,
-            duration,
-            move |hover, _, cx| {
-                let _ = hover_page.update(cx, |this, cx| {
-                    if this.hover != hover {
-                        this.hover = hover;
-                        cx.notify();
-                    }
-                });
+            crate::ui::waveform::WaveformProps {
+                peaks: doc.peaks.clone(),
+                current_time: current,
+                duration: raw_duration,
+                hover: self.hover,
+                scrub_progress,
+                viewport: self.waveform_viewport,
+                selection: self.waveform_selection,
+                height: if caption.is_some() {
+                    crate::ui::waveform::COMPACT_HEIGHT
+                } else {
+                    crate::ui::waveform::HEIGHT
+                },
+                is_busy,
+                has_trimmed_boundaries,
+                focus_handle: self.waveform_focus.clone(),
             },
-            move |at, _, cx| {
-                let _ = page.update(cx, |this, cx| this.seek(at, cx));
+            crate::ui::waveform::WaveformHandlers {
+                on_hover: Box::new(move |hover, _, cx| {
+                    let _ = hover_page.update(cx, |this, cx| {
+                        if this.hover != hover {
+                            this.hover = hover;
+                            cx.notify();
+                        }
+                    });
+                }),
+                on_mouse_down: Box::new(move |fraction, x_px, in_scrollbar, window, cx| {
+                    let _ = down_page.update(cx, |this, cx| {
+                        this.on_waveform_mouse_down(fraction, x_px, in_scrollbar, window, cx);
+                    });
+                }),
+                on_mouse_move: Box::new(move |fraction, x_px, width_px, dragging, _, cx| {
+                    let _ = move_page.update(cx, |this, cx| {
+                        this.on_waveform_mouse_move(fraction, x_px, width_px, dragging, cx);
+                    });
+                }),
+                on_mouse_up: Box::new(move |fraction, _, cx| {
+                    let _ = up_page.update(cx, |this, cx| {
+                        this.on_waveform_mouse_up(fraction, cx);
+                    });
+                }),
+                on_zoom: Box::new(move |factor, anchor, _, cx| {
+                    let _ = zoom_page.update(cx, |this, cx| {
+                        this.waveform_viewport.zoom_by(factor, anchor);
+                        cx.notify();
+                    });
+                }),
+                on_pan: Box::new(move |delta, _, cx| {
+                    let _ = pan_page.update(cx, |this, cx| {
+                        this.waveform_viewport.pan_by(delta);
+                        cx.notify();
+                    });
+                }),
+                on_reset_zoom: Box::new(move |_, cx| {
+                    let _ = reset_page.update(cx, |this, cx| {
+                        this.waveform_viewport.reset();
+                        cx.notify();
+                    });
+                }),
+                on_clear_selection: Box::new(move |_, cx| {
+                    let _ = clear_page.update(cx, |this, cx| {
+                        this.waveform_selection.clear();
+                        cx.notify();
+                    });
+                }),
+                on_trim_selection: Box::new(move |range, _, cx| {
+                    let _ = trim_page.update(cx, |this, cx| {
+                        this.trim_to_selection(range, cx);
+                    });
+                }),
+                on_extract_selection: Box::new(move |range, _, cx| {
+                    let _ = extract_page.update(cx, |this, cx| {
+                        this.extract_selection(range, cx);
+                    });
+                }),
+                on_restore_full: Box::new(move |_, cx| {
+                    let _ = restore_page.update(cx, |this, cx| {
+                        this.restore_full_recording(cx);
+                    });
+                }),
             },
             cx,
-        )
-        .h(px(if caption.is_some() { 24. } else { 40. }));
+        );
         panel_surface(cx)
             .id("meeting-audio-player")
             .px(px(14.))
             .py(px(9.))
             .flex()
-            .items_center()
-            .gap(px(12.))
+            .flex_col()
+            .gap(px(8.))
             .child(
-                div()
-                    .id("audio-play")
-                    .flex_none()
-                    .size(px(30.))
-                    .rounded_full()
-                    .bg(lb.accent_fill)
-                    .hover(|s| s.opacity(0.9))
-                    .cursor_pointer()
-                    .flex()
+                h_flex()
+                    .w_full()
                     .items_center()
-                    .justify_center()
-                    .child(if self.playing {
-                        h_flex()
-                            .gap(px(3.))
-                            .child(div().w(px(3.)).h(px(11.)).rounded(px(1.)).bg(white()))
-                            .child(div().w(px(3.)).h(px(11.)).rounded(px(1.)).bg(white()))
-                            .into_any_element()
-                    } else {
-                        crate::ui::waveform::play_glyph(px(12.), white()).into_any_element()
-                    })
-                    .tooltip(|window, cx| {
-                        Tooltip::new(lokalbot_i18n::tr("Play / pause (Space)")).build(window, cx)
-                    })
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_playback(cx))),
+                    .gap(px(12.))
+                    .child(
+                        div()
+                            .id("audio-play")
+                            .flex_none()
+                            .size(px(30.))
+                            .rounded_full()
+                            .bg(lb.accent_fill)
+                            .hover(|s| s.opacity(0.9))
+                            .cursor_pointer()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(if self.playing {
+                                h_flex()
+                                    .gap(px(3.))
+                                    .child(div().w(px(3.)).h(px(11.)).rounded(px(1.)).bg(white()))
+                                    .child(div().w(px(3.)).h(px(11.)).rounded(px(1.)).bg(white()))
+                                    .into_any_element()
+                            } else {
+                                crate::ui::waveform::play_glyph(px(12.), white()).into_any_element()
+                            })
+                            .tooltip(|window, cx| {
+                                Tooltip::new(lokalbot_i18n::tr("Play / pause (Space)"))
+                                    .build(window, cx)
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_playback(cx))),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap(px(4.))
+                            .when_some(caption, |this, row| {
+                                this.child(self.render_caption(doc, row, cx))
+                            })
+                            .child(waveform),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(ty::SECONDARY)
+                            .text_color(lb.supporting)
+                            .child(format!(
+                                "{} / {}",
+                                lokalbot_core::time::short_stamp(current),
+                                lokalbot_core::time::short_stamp(active_end)
+                            )),
+                    )
+                    .child(
+                        Button::new("audio-speed")
+                            .ghost()
+                            .small()
+                            .label(speed_label(speed))
+                            .dropdown_caret(true)
+                            .dropdown_menu(move |menu, _, _| {
+                                let mut menu = menu;
+                                for value in [0.75f32, 1., 1.25, 1.5, 1.75, 2.] {
+                                    let target = speed_target.clone();
+                                    menu = menu.item(
+                                        PopupMenuItem::new(speed_label(value))
+                                            .checked((speed - value).abs() < 0.01)
+                                            .on_click(move |_, _, cx| {
+                                                let _ = target.update(cx, |this, cx| {
+                                                    this.set_speed(value, cx)
+                                                });
+                                            }),
+                                    );
+                                }
+                                let target = speed_target.clone();
+                                menu.separator().item(
+                                    PopupMenuItem::new(lokalbot_i18n::tr("Reset to 1x")).on_click(
+                                        move |_, _, cx| {
+                                            let _ = target
+                                                .update(cx, |this, cx| this.set_speed(1., cx));
+                                        },
+                                    ),
+                                )
+                            }),
+                    ),
             )
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .gap(px(4.))
-                    .when_some(caption, |this, row| {
-                        this.child(self.render_caption(doc, row, cx))
-                    })
-                    .child(waveform),
-            )
+            .when_some(self.waveform_selection.selection(), |this, range| {
+                this.child(self.render_selection_bar(range, is_busy, cx))
+            })
+            .into_any_element()
+    }
+
+    fn render_selection_bar(
+        &self,
+        range: lokalbot_core::ContentRange,
+        is_busy: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let lb = cx.lb().clone();
+        h_flex()
+            .id("meeting-selection-bar")
+            .w_full()
+            .pt(px(2.))
+            .gap(px(8.))
+            .items_center()
+            .child(ui::status_dot(
+                crate::ui::waveform::selection_yellow(),
+                px(8.),
+            ))
             .child(
                 div()
                     .flex_none()
                     .text_size(ty::SECONDARY)
-                    .text_color(lb.supporting)
+                    .text_color(lb.text_secondary)
                     .child(format!(
-                        "{} / {}",
-                        action_row::short_stamp(current),
-                        action_row::short_stamp(duration)
+                        "{} – {}",
+                        lokalbot_core::time::stamp(range.start),
+                        lokalbot_core::time::stamp(range.end)
                     )),
             )
+            .child(div().flex_1())
             .child(
-                Button::new("audio-speed")
+                ui::controls::bordered(
+                    "meeting-selection-trim",
+                    lokalbot_i18n::tr("Trim to Selection"),
+                )
+                .small()
+                .disabled(is_busy)
+                .on_click(cx.listener(move |this, _, _, cx| this.trim_to_selection(range, cx))),
+            )
+            .child(
+                Button::new("meeting-selection-extract")
+                    .primary()
+                    .small()
+                    .label(lokalbot_i18n::tr("New Meeting from Selection"))
+                    .disabled(is_busy)
+                    .on_click(cx.listener(move |this, _, _, cx| this.extract_selection(range, cx))),
+            )
+            .child(
+                Button::new("meeting-selection-clear")
                     .ghost()
                     .small()
-                    .label(speed_label(speed))
-                    .dropdown_caret(true)
-                    .dropdown_menu(move |menu, _, _| {
-                        let mut menu = menu;
-                        for value in [0.75f32, 1., 1.25, 1.5, 1.75, 2.] {
-                            let target = speed_target.clone();
-                            menu = menu.item(
-                                PopupMenuItem::new(speed_label(value))
-                                    .checked((speed - value).abs() < 0.01)
-                                    .on_click(move |_, _, cx| {
-                                        let _ =
-                                            target.update(cx, |this, cx| this.set_speed(value, cx));
-                                    }),
-                            );
-                        }
-                        let target = speed_target.clone();
-                        menu.separator().item(
-                            PopupMenuItem::new(lokalbot_i18n::tr("Reset to 1x")).on_click(
-                                move |_, _, cx| {
-                                    let _ = target.update(cx, |this, cx| this.set_speed(1., cx));
-                                },
-                            ),
-                        )
-                    }),
+                    .icon(gpui_kit::component::Icon::new(Ico::X))
+                    .tooltip(lokalbot_i18n::tr("Clear Selection"))
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.waveform_selection.clear();
+                        cx.notify();
+                    })),
             )
             .into_any_element()
     }
@@ -477,9 +631,19 @@ impl MeetingsPage {
         };
         let start = line.start;
         h_flex()
+            .id("meeting-player-caption")
             .w_full()
             .gap(px(6.))
             .items_center()
+            .px(px(4.))
+            .py(px(1.))
+            .rounded(px(4.))
+            .cursor_pointer()
+            .hover(|s| s.bg(lb.hover))
+            .tooltip(|window, cx| {
+                Tooltip::new(lokalbot_i18n::tr("Show in transcript")).build(window, cx)
+            })
+            .on_click(cx.listener(move |this, _, _, cx| this.show_in_transcript(start, cx)))
             .child(ui::status_dot(super::speaker_color(line.color, cx), px(7.)))
             .child(
                 div()
@@ -500,25 +664,6 @@ impl MeetingsPage {
                     .text_color(lb.supporting)
                     .child(line.text.clone()),
             )
-            .when(self.tab != MeetingTab::Transcript, |this| {
-                this.child(
-                    div().flex_none().child(
-                        ui::link(
-                            "meeting-show-in-transcript",
-                            lokalbot_i18n::tr("Show in transcript"),
-                            {
-                                let page = cx.entity().downgrade();
-                                move |_, cx| {
-                                    let _ = page
-                                        .update(cx, |this, cx| this.show_in_transcript(start, cx));
-                                }
-                            },
-                            cx,
-                        )
-                        .text_size(ty::SECONDARY),
-                    ),
-                )
-            })
             .into_any_element()
     }
 

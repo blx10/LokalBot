@@ -130,6 +130,12 @@ pub struct MeetingsPage {
     player_loading: bool,
     playing: bool,
     poll: Option<Task<()>>,
+    waveform_focus: FocusHandle,
+    waveform_viewport: crate::ui::waveform::WaveformViewport,
+    waveform_selection: crate::ui::waveform::WaveformSelectionState,
+    waveform_drag: Option<(crate::ui::waveform::WaveformDrag, f32)>,
+    waveform_bounds_for: Option<(Uuid, f64, f64)>,
+    selection_busy: bool,
     page_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     back_bounds: Rc<Cell<Option<Bounds<Pixels>>>>,
     tick: Option<Task<()>>,
@@ -306,6 +312,12 @@ impl MeetingsPage {
             player_loading: false,
             playing: false,
             poll: None,
+            waveform_focus: cx.focus_handle(),
+            waveform_viewport: Default::default(),
+            waveform_selection: Default::default(),
+            waveform_drag: None,
+            waveform_bounds_for: None,
+            selection_busy: false,
             page_bounds: Rc::new(Cell::new(None)),
             back_bounds: Rc::new(Cell::new(None)),
             tick: None,
@@ -486,6 +498,9 @@ impl MeetingsPage {
             .get(&id)
             .map_or(1., |(_, speed)| *speed);
         self.hover = None;
+        self.waveform_selection.clear();
+        self.waveform_drag = None;
+        self.waveform_bounds_for = None;
         self.doc_loading = true;
         self.load_doc(window, cx);
         cx.notify();
@@ -522,7 +537,10 @@ impl MeetingsPage {
                     this.load_notes_editor(window, cx);
                 }
                 if switched || audio_changed {
+                    this.sync_waveform_bounds();
                     this.open_player(cx);
+                } else {
+                    this.sync_player_bounds(cx);
                 }
                 if switched && doc_has_journal(&this.doc) {
                     this.recover_saved_names(cx);
