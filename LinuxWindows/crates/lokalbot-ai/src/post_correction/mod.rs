@@ -18,8 +18,8 @@ use crate::error::{AiError, ai_error};
 use crate::http;
 use crate::sanitize;
 use crate::think::{
-    ChatRequest, Dialect, chat_body, consent, parse_chat_completion, resolve_api_key,
-    trimmed_base, with_data_policy,
+    ChatRequest, Dialect, chat_body, consent, parse_chat_completion, resolve_api_key, trimmed_base,
+    with_data_policy,
 };
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -212,10 +212,7 @@ impl PostCorrector {
     pub fn new(config: PostCorrectionConfig, approved_origins: Vec<String>) -> Result<Self> {
         let base_url = trimmed_base(&config.base_url);
         if base_url.is_empty() {
-            return Err(AiError::Unavailable(
-                "Post-correction base_url is empty.".into(),
-            )
-            .into());
+            return Err(AiError::Unavailable("Post-correction base_url is empty.".into()).into());
         }
         if config.primary_judge_model.trim().is_empty() {
             return Err(AiError::NoModel.into());
@@ -323,7 +320,9 @@ impl PostCorrector {
                     .unwrap_or(default_wait);
                 let budget_left = timeout.saturating_sub(started.elapsed());
                 if budget_left > Duration::from_millis(50) {
-                    std::thread::sleep(wait.min(budget_left.saturating_sub(Duration::from_millis(25))));
+                    std::thread::sleep(
+                        wait.min(budget_left.saturating_sub(Duration::from_millis(25))),
+                    );
                     continue;
                 }
             }
@@ -364,25 +363,27 @@ impl PostCorrector {
 
         std::thread::scope(|scope| {
             for _ in 0..workers {
-                scope.spawn(|| loop {
-                    if aborted.load(Ordering::Acquire) {
-                        break;
-                    }
-                    let idx = {
-                        let mut guard = cursor.lock();
-                        if *guard >= batch_count {
+                scope.spawn(|| {
+                    loop {
+                        if aborted.load(Ordering::Acquire) {
                             break;
                         }
-                        let current = *guard;
-                        *guard += 1;
-                        current
-                    };
-                    let (start, end) = ranges[idx];
-                    let outcome = self.process_batch(segments, start, end);
-                    if outcome.is_err() {
-                        aborted.store(true, Ordering::Release);
+                        let idx = {
+                            let mut guard = cursor.lock();
+                            if *guard >= batch_count {
+                                break;
+                            }
+                            let current = *guard;
+                            *guard += 1;
+                            current
+                        };
+                        let (start, end) = ranges[idx];
+                        let outcome = self.process_batch(segments, start, end);
+                        if outcome.is_err() {
+                            aborted.store(true, Ordering::Release);
+                        }
+                        results.lock()[idx] = Some(outcome);
                     }
-                    results.lock()[idx] = Some(outcome);
                 });
             }
         });
@@ -392,8 +393,18 @@ impl PostCorrector {
         let mut audit_segments = Vec::with_capacity(segments.len());
         let mut warnings = Vec::new();
 
+        let mut collected = Vec::with_capacity(batch_count);
         for slot in results.into_inner() {
-            let batch_outcome = slot.ok_or_else(|| anyhow::anyhow!("missing batch result"))??;
+            match slot {
+                Some(Ok(batch_outcome)) => collected.push(batch_outcome),
+                Some(Err(err)) => return Err(err),
+                None => {}
+            }
+        }
+        if collected.len() != batch_count {
+            return Err(anyhow::anyhow!("missing batch result"));
+        }
+        for batch_outcome in collected {
             ordered_segments.extend(batch_outcome.segments);
             ordered_texts.extend(batch_outcome.texts);
             audit_segments.extend(batch_outcome.audit_segments);
@@ -415,7 +426,12 @@ impl PostCorrector {
         })
     }
 
-    fn process_batch(&self, all: &[MultiSttSegment], start: usize, end: usize) -> Result<BatchOutput> {
+    fn process_batch(
+        &self,
+        all: &[MultiSttSegment],
+        start: usize,
+        end: usize,
+    ) -> Result<BatchOutput> {
         let batch = &all[start..end];
         let prev_start = start.saturating_sub(2);
         let prev_context = &all[prev_start..start];
@@ -860,8 +876,16 @@ mod tests {
             .unwrap()
             .correct(&segs)
             .unwrap();
-        assert_eq!(out.texts, [segs[0].primary_text.clone(), segs[1].primary_text.clone()]);
-        assert!(out.audit.segments.iter().all(|s| s.judge_fallback && !s.changed));
+        assert_eq!(
+            out.texts,
+            [segs[0].primary_text.clone(), segs[1].primary_text.clone()]
+        );
+        assert!(
+            out.audit
+                .segments
+                .iter()
+                .all(|s| s.judge_fallback && !s.changed)
+        );
         assert!(!out.audit.warnings.is_empty());
     }
 
@@ -899,9 +923,12 @@ mod tests {
         ));
 
         cfg.base_url = "http://remote-gateway.example.com/v1".into();
-        let err = PostCorrector::new(cfg.clone(), vec!["http://remote-gateway.example.com".into()])
-            .err()
-            .unwrap();
+        let err = PostCorrector::new(
+            cfg.clone(),
+            vec!["http://remote-gateway.example.com".into()],
+        )
+        .err()
+        .unwrap();
         assert!(matches!(
             err.downcast_ref::<AiError>(),
             Some(AiError::ConsentRequired(_))
@@ -916,7 +943,8 @@ mod tests {
 
     #[test]
     fn api_key_precedence_prefers_config_over_keyring() {
-        let server = StubServer::start(|_| chat_ok(r#"{"segments":[{"segment_id":1,"text":"ok"}]}"#));
+        let server =
+            StubServer::start(|_| chat_ok(r#"{"segments":[{"segment_id":1,"text":"ok"}]}"#));
         let mut cfg = config_for(server.url("/v1"));
         cfg.support_critic_models = Vec::new();
         cfg.api_key = "sk-from-config".into();
@@ -927,7 +955,12 @@ mod tests {
             .with_keyring_fallback(Some("sk-from-keyring".into()));
         corrector.correct(&segs).unwrap();
         assert_eq!(
-            server.requests().pop().unwrap().header("authorization").as_deref(),
+            server
+                .requests()
+                .pop()
+                .unwrap()
+                .header("authorization")
+                .as_deref(),
             Some("Bearer sk-from-config")
         );
 
@@ -937,8 +970,110 @@ mod tests {
             .with_keyring_fallback(Some("sk-from-keyring".into()));
         fallback.correct(&segs).unwrap();
         assert_eq!(
-            server.requests().pop().unwrap().header("authorization").as_deref(),
+            server
+                .requests()
+                .pop()
+                .unwrap()
+                .header("authorization")
+                .as_deref(),
             Some("Bearer sk-from-keyring")
         );
+    }
+
+    #[test]
+    fn critic_line_diff_handles_bracket_colon_quotes_noop_and_out_of_batch() {
+        let allowed = HashSet::from([1usize, 2usize, 3usize]);
+        let (quoted, used_ld) = critic::parse_critic_reply(
+            "- [Seg 1]: | \"foo\" => \"bar\" | zipformer-oayk | quoted\n[Segment #2]: | 'baz' => 'qux' | context | single quoted\n3 | LocalBOT'u => LokalBot'u | context | inner apostrophe",
+            &allowed,
+        )
+        .unwrap();
+        assert!(used_ld);
+        assert_eq!(quoted.len(), 3);
+        assert_eq!(quoted[0].segment_id, 1);
+        assert_eq!(quoted[0].wrong_in_primary, "foo");
+        assert_eq!(quoted[0].suggested_fix, "bar");
+        assert_eq!(quoted[1].segment_id, 2);
+        assert_eq!(quoted[1].wrong_in_primary, "baz");
+        assert_eq!(quoted[1].suggested_fix, "qux");
+        assert_eq!(quoted[2].segment_id, 3);
+        assert_eq!(quoted[2].wrong_in_primary, "LocalBOT'u");
+        assert_eq!(quoted[2].suggested_fix, "LokalBot'u");
+
+        let (out_of_batch, out_ld) = critic::parse_critic_reply(
+            "- [Seg 9999] | wrong => fix | zipformer-oayk | out of batch\n",
+            &allowed,
+        )
+        .unwrap();
+        assert!(out_ld);
+        assert!(out_of_batch.is_empty());
+
+        let (noop, noop_ld) = critic::parse_critic_reply(
+            "- [Seg 1] | same => same | zipformer-oayk | noop\n",
+            &allowed,
+        )
+        .unwrap();
+        assert!(noop_ld);
+        assert!(noop.is_empty());
+
+        assert!(critic::parse_critic_reply("Cannot comply with your request", &allowed).is_err());
+
+        let server = StubServer::start(|req| {
+            let body = req.json();
+            match body["model"].as_str().unwrap_or("") {
+                "gpt-oss-120b" => chat_ok(
+                    "- [Seg 9999] | wrong => fix | zipformer-oayk | out of batch\n- [Seg 1]: | \"primary\" => \"fixed\" | zipformer-oayk | quote",
+                ),
+                "Qwen3.8-27B" => {
+                    chat_ok(r#"{"segments":[{"segment_id":1,"text":"segment 0 fixed text"}]}"#)
+                }
+                _ => Reply::Text(404, "nope".into()),
+            }
+        });
+        let mut cfg = config_for(server.url("/v1"));
+        cfg.support_critic_models = vec!["gpt-oss-120b".into()];
+        cfg.continue_on_critic_failure = false;
+        let out = PostCorrector::new(cfg, Vec::new())
+            .unwrap()
+            .correct(&sample_segments(1))
+            .unwrap();
+        assert_eq!(out.texts, ["segment 0 fixed text"]);
+        assert!(out.audit.segments[0].critic_candidates[0].used_line_diff_fallback);
+        assert!(
+            out.audit.segments[0].critic_candidates[0].candidates[0].wrong_in_primary == "primary"
+        );
+        assert!(out.audit.segments[0].critic_candidates[0].candidates[0].suggested_fix == "fixed");
+    }
+
+    #[test]
+    fn multi_batch_abort_returns_actual_batch_error_instead_of_missing_slot() {
+        let server = StubServer::start(|req| {
+            let body = req.json();
+            let prompt = body["messages"][1]["content"].as_str().unwrap_or("");
+            if prompt.contains("[Seg 1]") {
+                std::thread::sleep(Duration::from_millis(250));
+                return chat_ok(r#"{"segments":[{"segment_id":1,"text":"ok"}]}"#);
+            }
+            Reply::Text(
+                500,
+                "batch 2 exploded with Bearer sk-test-secret-key-987".into(),
+            )
+        });
+        let mut cfg = config_for(server.url("/v1"));
+        cfg.support_critic_models = vec!["gpt-oss-120b".into()];
+        cfg.continue_on_critic_failure = false;
+        cfg.segments_per_batch = 1;
+        cfg.max_concurrent_batches = 2;
+
+        let err = PostCorrector::new(cfg, Vec::new())
+            .unwrap()
+            .correct(&sample_segments(3))
+            .unwrap_err();
+        let err_str = format!("{err:#}");
+        assert!(
+            !err_str.contains("missing batch result"),
+            "unexpected error: {err_str}"
+        );
+        assert!(!err_str.contains("sk-test-secret-key-987"));
     }
 }

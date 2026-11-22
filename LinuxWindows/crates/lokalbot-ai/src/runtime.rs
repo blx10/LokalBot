@@ -1548,10 +1548,10 @@ impl ServerInner {
     fn start(&self, model_id: &str, model_path: &Path) -> Result<Running> {
         let installer = &self.installer;
         if installer.local_server_disabled.load(Ordering::Acquire) {
-            return Err(
-                AiError::Unavailable("Local llama-server is disabled by configuration.".into())
-                    .into(),
-            );
+            return Err(AiError::Unavailable(
+                "Local llama-server is disabled by configuration.".into(),
+            )
+            .into());
         }
         let never = AtomicBool::new(false);
         let allow_download = self.role.downloads_runtime() && installer.preference() != "cuda";
@@ -2076,10 +2076,10 @@ impl RuntimeManager {
         progress: &mut dyn FnMut(u64, u64),
     ) -> Result<()> {
         if self.is_local_server_disabled() {
-            return Err(
-                AiError::Unavailable("Local llama-server is disabled by configuration.".into())
-                    .into(),
-            );
+            return Err(AiError::Unavailable(
+                "Local llama-server is disabled by configuration.".into(),
+            )
+            .into());
         }
         self.set_backend_preference(&settings.llama_backend);
         let installer = &self.shared.installer;
@@ -2110,10 +2110,10 @@ impl RuntimeManager {
         progress: &mut dyn FnMut(u64, u64),
     ) -> Result<()> {
         if self.is_local_server_disabled() {
-            return Err(
-                AiError::Unavailable("Local llama-server is disabled by configuration.".into())
-                    .into(),
-            );
+            return Err(AiError::Unavailable(
+                "Local llama-server is disabled by configuration.".into(),
+            )
+            .into());
         }
         self.set_backend_preference(&settings.llama_backend);
         check_cancelled(cancel)?;
@@ -2317,10 +2317,10 @@ impl RuntimeManager {
 
     pub fn main_server_for_task(&self, model: &ModelEntry) -> Result<Lease> {
         if self.is_local_server_disabled() {
-            return Err(
-                AiError::Unavailable("Local llama-server is disabled by configuration.".into())
-                    .into(),
-            );
+            return Err(AiError::Unavailable(
+                "Local llama-server is disabled by configuration.".into(),
+            )
+            .into());
         }
         self.start_reaper();
         self.server(Role::Main).lease_model_for_task(model)
@@ -2344,10 +2344,10 @@ impl RuntimeManager {
 
     pub fn lease(&self, role: Role, model: &ModelEntry) -> Result<Lease> {
         if self.is_local_server_disabled() {
-            return Err(
-                AiError::Unavailable("Local llama-server is disabled by configuration.".into())
-                    .into(),
-            );
+            return Err(AiError::Unavailable(
+                "Local llama-server is disabled by configuration.".into(),
+            )
+            .into());
         }
         self.start_reaper();
         self.server(role).lease_model(model)

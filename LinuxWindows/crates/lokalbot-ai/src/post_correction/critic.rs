@@ -149,13 +149,7 @@ fn parse_segment_id_value(value: &Value) -> Option<usize> {
 }
 
 fn parse_segment_id_str(raw: &str) -> Option<usize> {
-    let trimmed = raw
-        .trim()
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .trim()
-        .trim_end_matches(':')
-        .trim();
+    let trimmed = raw.trim().trim_matches(['[', ']', ':', ' ', '\t']).trim();
     let lower = trimmed.to_ascii_lowercase();
     let digits = if let Some(rest) = lower.strip_prefix("segment") {
         rest
@@ -166,7 +160,7 @@ fn parse_segment_id_str(raw: &str) -> Option<usize> {
     };
     digits
         .trim()
-        .trim_start_matches('#')
+        .trim_start_matches(['#', ':'])
         .trim()
         .parse::<usize>()
         .ok()
@@ -190,9 +184,7 @@ fn candidate_from_map(
         .and_then(Value::as_str)?
         .trim()
         .to_string();
-    if wrong_in_primary.is_empty()
-        || suggested_fix.is_empty()
-        || wrong_in_primary == suggested_fix
+    if wrong_in_primary.is_empty() || suggested_fix.is_empty() || wrong_in_primary == suggested_fix
     {
         return None;
     }
@@ -217,11 +209,31 @@ fn candidate_from_map(
     })
 }
 
-fn parse_line_diff(
-    text: &str,
-    allowed_ids: &HashSet<usize>,
-) -> Vec<CorrectionCandidate> {
-    let mut out = Vec::new();
+struct LineDiffParse {
+    candidates: Vec<CorrectionCandidate>,
+    matched_any_syntax: bool,
+}
+
+fn strip_matching_quotes(raw: &str) -> &str {
+    let trimmed = raw.trim();
+    if let Some(inner) = trimmed.strip_prefix('"').and_then(|s| s.strip_suffix('"'))
+        && !inner.contains('"')
+    {
+        return inner.trim();
+    }
+    if let Some(inner) = trimmed
+        .strip_prefix('\'')
+        .and_then(|s| s.strip_suffix('\''))
+        && !inner.contains('\'')
+    {
+        return inner.trim();
+    }
+    trimmed
+}
+
+fn parse_line_diff(text: &str, allowed_ids: &HashSet<usize>) -> LineDiffParse {
+    let mut candidates = Vec::new();
+    let mut matched_any_syntax = false;
     for line in text.lines() {
         let trimmed = line.trim();
         let trimmed = trimmed
@@ -239,9 +251,6 @@ fn parse_line_diff(
         let Some(segment_id) = parse_segment_id_str(parts[0]) else {
             continue;
         };
-        if !allowed_ids.contains(&segment_id) {
-            continue;
-        }
         let diff_part = parts[1].trim();
         let Some((wrong_raw, fix_raw)) = diff_part
             .split_once("=>")
@@ -249,12 +258,13 @@ fn parse_line_diff(
         else {
             continue;
         };
-        let wrong_in_primary = wrong_raw.trim().to_string();
-        let suggested_fix = fix_raw.trim().to_string();
-        if wrong_in_primary.is_empty()
-            || suggested_fix.is_empty()
-            || wrong_in_primary == suggested_fix
-        {
+        let wrong_in_primary = strip_matching_quotes(wrong_raw).to_string();
+        let suggested_fix = strip_matching_quotes(fix_raw).to_string();
+        if wrong_in_primary.is_empty() || suggested_fix.is_empty() {
+            continue;
+        }
+        matched_any_syntax = true;
+        if !allowed_ids.contains(&segment_id) || wrong_in_primary == suggested_fix {
             continue;
         }
         let supported_by = parts
@@ -265,7 +275,7 @@ fn parse_line_diff(
             .get(3)
             .map(|s| s.trim().to_string())
             .unwrap_or_default();
-        out.push(CorrectionCandidate {
+        candidates.push(CorrectionCandidate {
             segment_id,
             wrong_in_primary,
             suggested_fix,
@@ -273,7 +283,10 @@ fn parse_line_diff(
             reason,
         });
     }
-    out
+    LineDiffParse {
+        candidates,
+        matched_any_syntax,
+    }
 }
 
 pub(crate) fn parse_critic_reply(
@@ -306,9 +319,9 @@ pub(crate) fn parse_critic_reply(
         return Ok((candidates, false));
     }
 
-    let line_candidates = parse_line_diff(unfenced, allowed_ids);
-    if !line_candidates.is_empty() {
-        return Ok((line_candidates, true));
+    let line_parse = parse_line_diff(unfenced, allowed_ids);
+    if line_parse.matched_any_syntax {
+        return Ok((line_parse.candidates, true));
     }
 
     let normalized = unfenced.trim().to_ascii_uppercase();

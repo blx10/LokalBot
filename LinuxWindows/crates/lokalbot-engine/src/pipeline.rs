@@ -1429,10 +1429,10 @@ mod tests {
 
     #[test]
     fn post_correction_stage_updates_transcript_and_writes_audit_json() {
-        use std::io::{BufRead, BufReader, Read, Write};
-        use std::net::TcpListener;
         use lokalbot_ai::post_correction::PostCorrectionConfig;
         use lokalbot_core::model::transcript::{Segment, Transcript};
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
 
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -1542,5 +1542,185 @@ mod tests {
         assert!(audit_path.is_file());
         let audit_text = std::fs::read_to_string(&audit_path).unwrap();
         assert!(!audit_text.contains("sk-pipeline-secret"));
+    }
+
+    #[test]
+    fn post_correction_stage_omits_audit_json_when_save_audit_log_is_false() {
+        use lokalbot_ai::post_correction::PostCorrectionConfig;
+        use lokalbot_core::model::transcript::{Segment, Transcript};
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut first = String::new();
+                let _ = reader.read_line(&mut first);
+                let mut len = 0usize;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    let line = line.trim_end();
+                    if line.is_empty() {
+                        break;
+                    }
+                    if let Some((k, v)) = line.split_once(':')
+                        && k.eq_ignore_ascii_case("content-length")
+                    {
+                        len = v.trim().parse().unwrap_or(0);
+                    }
+                }
+                let mut buf = vec![0u8; len];
+                let _ = reader.read_exact(&mut buf);
+                let req_json: serde_json::Value =
+                    serde_json::from_slice(&buf).unwrap_or(serde_json::Value::Null);
+                let model = req_json["model"].as_str().unwrap_or("");
+                let content = match model {
+                    "Qwen3.8-27B" => r#"{"segments":[{"segment_id":1,"text":"temiz metin"}]}"#,
+                    _ => r#"{"candidates":[]}"#,
+                };
+                let body = serde_json::json!({
+                    "choices": [{
+                        "message": { "role": "assistant", "content": content },
+                        "finish_reason": "stop"
+                    }]
+                })
+                .to_string();
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(body.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+
+        let (_dir, library) = library();
+        let meeting = finished_without_audio(&library);
+        let mut settings = lokalbot_core::Settings::default();
+        let pc_cfg = PostCorrectionConfig {
+            enabled: true,
+            base_url: format!("http://127.0.0.1:{port}/v1"),
+            api_key: "sk-no-audit".into(),
+            support_critic_models: Vec::new(),
+            ..Default::default()
+        };
+        crate::post_correction::set_post_correction_config(&mut settings, Some(&pc_cfg));
+        crate::post_correction::set_save_audit_log(&mut settings, false);
+
+        let stages = Stages::default();
+        let seen = stages.clone();
+        let shared = Shared::for_tests(library.clone(), settings.clone(), move |event| {
+            if let EngineEvent::Processing { stage, .. } = event {
+                seen.lock().push(stage);
+            }
+        });
+        let models = crate::models::Models::new(shared.clone());
+        let pipeline = Pipeline::start(shared, models);
+
+        let transcript = Transcript {
+            segments: vec![Segment {
+                start: 0.0,
+                end: 2.0,
+                speaker: "Speaker 1".into(),
+                text: "ham metin".into(),
+                confidence: Some(0.8),
+                timing_precision: None,
+                attribution: None,
+            }],
+            ..Default::default()
+        };
+        let corrected = pipeline
+            .inner
+            .post_correct_transcript(&meeting, &settings, transcript)
+            .unwrap();
+        pipeline.stop();
+
+        assert_eq!(corrected.segments[0].text, "temiz metin");
+        assert!(stages.lock().contains(&Some(Stage::PostCorrecting)));
+        let audit_path = library
+            .meeting_dir(&meeting)
+            .join(crate::post_correction::AUDIT_FILE_NAME);
+        assert!(!audit_path.exists());
+    }
+
+    #[test]
+    fn post_correction_stage_skips_when_disabled_or_unconfigured() {
+        use lokalbot_ai::post_correction::PostCorrectionConfig;
+        use lokalbot_core::model::transcript::{Segment, Transcript};
+        use std::net::TcpListener;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_srv = hits.clone();
+        std::thread::spawn(move || {
+            for _stream in listener.incoming().flatten() {
+                hits_srv.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+
+        let (_dir, library) = library();
+        let meeting = finished_without_audio(&library);
+        let stages = Stages::default();
+        let seen = stages.clone();
+        let settings_unconfigured = lokalbot_core::Settings::default();
+        let shared = Shared::for_tests(
+            library.clone(),
+            settings_unconfigured.clone(),
+            move |event| {
+                if let EngineEvent::Processing { stage, .. } = event {
+                    seen.lock().push(stage);
+                }
+            },
+        );
+        let models = crate::models::Models::new(shared.clone());
+        let pipeline = Pipeline::start(shared, models);
+
+        let transcript = Transcript {
+            segments: vec![Segment {
+                start: 0.0,
+                end: 1.5,
+                speaker: "Speaker 1".into(),
+                text: "unchanged".into(),
+                confidence: None,
+                timing_precision: None,
+                attribution: None,
+            }],
+            ..Default::default()
+        };
+
+        let out_unconfigured = pipeline
+            .inner
+            .post_correct_transcript(&meeting, &settings_unconfigured, transcript.clone())
+            .unwrap();
+        assert_eq!(out_unconfigured.segments[0].text, "unchanged");
+
+        let mut settings_disabled = lokalbot_core::Settings::default();
+        let disabled_cfg = PostCorrectionConfig {
+            enabled: false,
+            base_url: format!("http://127.0.0.1:{port}/v1"),
+            ..Default::default()
+        };
+        crate::post_correction::set_post_correction_config(
+            &mut settings_disabled,
+            Some(&disabled_cfg),
+        );
+        let out_disabled = pipeline
+            .inner
+            .post_correct_transcript(&meeting, &settings_disabled, transcript)
+            .unwrap();
+        assert_eq!(out_disabled.segments[0].text, "unchanged");
+        pipeline.stop();
+
+        assert!(!stages.lock().contains(&Some(Stage::PostCorrecting)));
+        assert_eq!(hits.load(Ordering::SeqCst), 0);
     }
 }

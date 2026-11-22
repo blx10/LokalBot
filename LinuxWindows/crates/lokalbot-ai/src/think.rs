@@ -1774,7 +1774,7 @@ fn post_chat_within(
     let agent = http::agent(base, timeout);
     let reply = http::post_json(&agent, &format!("{base}/chat/completions"), bearer, body)?;
     if !reply.ok() {
-        return Err(reply.status_error().into());
+        return Err(reply.redacted_status_error(bearer).into());
     }
     parse_chat_completion(&reply.json()?)
 }
@@ -1787,10 +1787,54 @@ fn is_stream_unsupported(err: &anyhow::Error) -> bool {
     err.downcast_ref::<StreamUnsupported>().is_some()
 }
 
+#[derive(Default, PartialEq, Eq)]
+enum HarmonyMode {
+    #[default]
+    Normal,
+    Hidden,
+    AwaitFinalMessage,
+}
+
 #[derive(Default)]
 struct ThinkFilter {
     pending: String,
-    inside: bool,
+    think_depth: usize,
+    harmony: HarmonyMode,
+}
+
+const HARMONY_START_ROLES: [&str; 3] = ["<|start|>assistant", "<|start|>user", "<|start|>system"];
+
+const HARMONY_CHANNELS: [(&str, bool); 3] = [
+    ("<|channel|>analysis", true),
+    ("<|channel|>commentary", true),
+    ("<|channel|>final", false),
+];
+
+const HARMONY_SIMPLE_TOKENS: [&str; 4] = ["<|return|>", "<|end|>", "<|call|>", "<|message|>"];
+
+const STREAM_FILTER_PREFIXES: [&str; 12] = [
+    "<think>",
+    "<|channel|>analysis",
+    "<|channel|>commentary",
+    "<|channel|>final",
+    "<|start|>assistant",
+    "<|start|>user",
+    "<|start|>system",
+    "<|constrain|>",
+    "<|return|>",
+    "<|end|>",
+    "<|call|>",
+    "<|message|>",
+];
+
+fn trailing_tag_prefix(pending: &str, tags: &[&str]) -> usize {
+    tags.iter()
+        .flat_map(|tag| {
+            let max = tag.len().saturating_sub(1).min(pending.len());
+            (1..=max).rev().filter(|n| pending.ends_with(&tag[..*n]))
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 impl ThinkFilter {
@@ -1798,31 +1842,150 @@ impl ThinkFilter {
         self.pending.push_str(delta);
         let mut out = String::new();
         loop {
-            let tag = if self.inside { "</think>" } else { "<think>" };
-            if let Some(at) = self.pending.find(tag) {
-                if !self.inside {
-                    out.push_str(&self.pending[..at]);
+            if self.think_depth > 0 {
+                let next_open = self.pending.find("<think>");
+                let next_close = self.pending.find("</think>");
+                match (next_open, next_close) {
+                    (Some(open), Some(close)) if open < close => {
+                        self.pending.drain(..open + "<think>".len());
+                        self.think_depth += 1;
+                        continue;
+                    }
+                    (Some(open), None) => {
+                        self.pending.drain(..open + "<think>".len());
+                        self.think_depth += 1;
+                        continue;
+                    }
+                    (_, Some(close)) => {
+                        self.pending.drain(..close + "</think>".len());
+                        self.think_depth -= 1;
+                        continue;
+                    }
+                    (None, None) => {
+                        let keep = trailing_tag_prefix(&self.pending, &["<think>", "</think>"]);
+                        let drop_len = self.pending.len() - keep;
+                        self.pending.drain(..drop_len);
+                        return out;
+                    }
                 }
-                self.pending.drain(..at + tag.len());
-                self.inside = !self.inside;
+            }
+
+            if self.harmony == HarmonyMode::Hidden {
+                if let Some(at) = self.pending.find("<|end|>") {
+                    self.pending.drain(..at + "<|end|>".len());
+                    self.harmony = HarmonyMode::Normal;
+                    continue;
+                }
+                let keep = trailing_tag_prefix(&self.pending, &["<|end|>"]);
+                let drop_len = self.pending.len() - keep;
+                self.pending.drain(..drop_len);
+                return out;
+            }
+
+            if self.harmony == HarmonyMode::AwaitFinalMessage {
+                if let Some(at) = self.pending.find("<|message|>") {
+                    self.pending.drain(..at + "<|message|>".len());
+                    self.harmony = HarmonyMode::Normal;
+                    continue;
+                }
+                let keep = trailing_tag_prefix(&self.pending, &["<|message|>"]);
+                let drop_len = self.pending.len() - keep;
+                self.pending.drain(..drop_len);
+                return out;
+            }
+
+            let Some(lt) = self.pending.find('<') else {
+                out.push_str(&self.pending);
+                self.pending.clear();
+                return out;
+            };
+            if lt > 0 {
+                out.push_str(&self.pending[..lt]);
+                self.pending.drain(..lt);
                 continue;
             }
-            let keep = (1..tag.len())
-                .rev()
-                .find(|n| self.pending.ends_with(&tag[..*n]))
-                .unwrap_or(0);
-            let flush = self.pending.len() - keep;
-            if !self.inside {
-                out.push_str(&self.pending[..flush]);
+
+            if self.pending.starts_with("<think>") {
+                self.pending.drain(..7);
+                self.think_depth = 1;
+                continue;
             }
-            self.pending.drain(..flush);
-            return out;
+            if let Some((tag, hidden)) = HARMONY_CHANNELS
+                .into_iter()
+                .find(|(t, _)| self.pending.starts_with(t))
+            {
+                self.pending.drain(..tag.len());
+                self.harmony = if hidden {
+                    HarmonyMode::Hidden
+                } else {
+                    HarmonyMode::AwaitFinalMessage
+                };
+                continue;
+            }
+            if let Some(tag) = HARMONY_START_ROLES
+                .into_iter()
+                .find(|t| self.pending.starts_with(t))
+            {
+                self.pending.drain(..tag.len());
+                continue;
+            }
+            if self.pending.starts_with("<|start|>") {
+                if HARMONY_START_ROLES
+                    .iter()
+                    .any(|t| t.starts_with(&self.pending))
+                {
+                    return out;
+                }
+                self.pending.drain(..9);
+                continue;
+            }
+            if self.pending.starts_with("<|constrain|>") {
+                let after = &self.pending["<|constrain|>".len()..];
+                if let Some(msg_rel) = after.find("<|message|>") {
+                    let between = &after[..msg_rel];
+                    if !between.contains("<|") && !between.contains('\n') && between.len() <= 64 {
+                        self.pending
+                            .drain(..("<|constrain|>".len() + msg_rel + "<|message|>".len()));
+                        continue;
+                    }
+                }
+                if !after.contains('\n') && !after.contains("<|") && after.len() < 32 {
+                    return out;
+                }
+                if self.pending.starts_with("<|constrain|>json") {
+                    self.pending.drain(..17);
+                    continue;
+                }
+                self.pending.drain(..13);
+                continue;
+            }
+            if let Some(tag) = HARMONY_SIMPLE_TOKENS
+                .into_iter()
+                .find(|t| self.pending.starts_with(t))
+            {
+                self.pending.drain(..tag.len());
+                continue;
+            }
+            if STREAM_FILTER_PREFIXES
+                .iter()
+                .any(|t| t.starts_with(&self.pending))
+            {
+                return out;
+            }
+            out.push('<');
+            self.pending.drain(..1);
         }
     }
 
     fn finish(&mut self) -> String {
         let rest = std::mem::take(&mut self.pending);
-        if self.inside { String::new() } else { rest }
+        if self.think_depth > 0 || self.harmony != HarmonyMode::Normal {
+            String::new()
+        } else if rest.starts_with("<|") {
+            model_json::strip_reasoning(&rest)
+        } else {
+            rest
+        }
     }
 }
 
@@ -1874,7 +2037,7 @@ fn stream_chat_within(
         if [400, 404, 405, 422, 501].contains(&stream.status) {
             return Err(StreamUnsupported.into());
         }
-        return Err(error.status_error().into());
+        return Err(error.redacted_status_error(bearer).into());
     }
     let mut filter = ThinkFilter::default();
     let mut content = String::new();
@@ -2003,7 +2166,7 @@ fn post_ollama(base: &str, body: &Value) -> Result<Completion> {
     let agent = http::agent(base, CHAT_TIMEOUT);
     let reply = http::post_json(&agent, &format!("{base}/api/chat"), None, body)?;
     if !reply.ok() {
-        return Err(reply.status_error().into());
+        return Err(reply.redacted_status_error(None).into());
     }
     let json = reply.json()?;
     let content = json
@@ -2039,7 +2202,7 @@ fn stream_ollama(
     let agent = http::agent(base, CHAT_TIMEOUT);
     let mut stream = http::post_stream(&agent, &format!("{base}/api/chat"), None, body)?;
     if let Some(error) = stream.error.take() {
-        return Err(error.status_error().into());
+        return Err(error.redacted_status_error(None).into());
     }
     let mut filter = ThinkFilter::default();
     let mut content = String::new();
@@ -2237,7 +2400,7 @@ impl EmbeddingClient {
                 }
             };
             if !reply.ok() {
-                return Err(reply.status_error().into());
+                return Err(reply.redacted_status_error(token.as_deref()).into());
             }
             let vectors = vectors_from_response(&reply.json()?)?;
             if vectors.len() != range.len() {
@@ -2497,7 +2660,7 @@ impl CompletionClient {
             &self.body(request, false),
         )?;
         if !reply.ok() {
-            return Err(reply.status_error().into());
+            return Err(reply.redacted_status_error(token.as_deref()).into());
         }
         reply
             .json()?
@@ -2522,7 +2685,7 @@ impl CompletionClient {
             &self.body(request, true),
         )?;
         if let Some(error) = stream.error.take() {
-            return Err(error.status_error().into());
+            return Err(error.redacted_status_error(token.as_deref()).into());
         }
         let mut text = String::new();
         let mut chunks = 0usize;
@@ -4106,13 +4269,9 @@ mod tests {
         settings.summarizer_backend = SummarizerBackend::OpenAICompatible;
         settings.openai_base_url = server.url("/v1");
         settings.openai_model = "Qwen3.8-27B".into();
-        let remote = ThinkClient::new_with_config_key(
-            &runtime,
-            &settings,
-            Some("sk-remote-think"),
-            None,
-        )
-        .unwrap();
+        let remote =
+            ThinkClient::new_with_config_key(&runtime, &settings, Some("sk-remote-think"), None)
+                .unwrap();
         assert_eq!(
             remote.complete(&ChatRequest::new("s", "u")).unwrap(),
             "remote ok"
@@ -4122,5 +4281,73 @@ mod tests {
             sent.header("authorization").as_deref(),
             Some("Bearer sk-remote-think")
         );
+    }
+
+    #[test]
+    fn http_401_echo_redacts_sk_and_non_sk_bearer_tokens_in_complete_and_stream() {
+        for secret in ["sk-secret-echo-123456", "adv-non-sk-bearer-token-888"] {
+            let server = StubServer::start(move |req| {
+                let auth = req.header("authorization").unwrap_or_default();
+                let raw_tok = auth.strip_prefix("Bearer ").unwrap_or("");
+                Reply::Json(
+                    401,
+                    json!({
+                        "error": {
+                            "message": format!("rejected {auth} and raw token {raw_tok}")
+                        }
+                    }),
+                )
+            });
+            let client =
+                ThinkClient::openai_compatible(&server.url("/v1"), "m", Some(secret.into()), &[])
+                    .unwrap();
+            let err_complete = client.complete(&ChatRequest::new("s", "u")).unwrap_err();
+            let msg_complete = format!("{err_complete:#}");
+            assert!(
+                matches!(
+                    err_complete.downcast_ref::<AiError>(),
+                    Some(AiError::HttpStatus { code: 401, .. })
+                ),
+                "unexpected error type: {msg_complete}"
+            );
+            assert!(
+                !msg_complete.contains(secret),
+                "complete leaked secret: {msg_complete}"
+            );
+
+            let err_stream = client
+                .stream(&ChatRequest::new("s", "u"), &mut |_| {})
+                .unwrap_err();
+            let msg_stream = format!("{err_stream:#}");
+            assert!(
+                matches!(
+                    err_stream.downcast_ref::<AiError>(),
+                    Some(AiError::HttpStatus { code: 401, .. })
+                ),
+                "unexpected stream error type: {msg_stream}"
+            );
+            assert!(
+                !msg_stream.contains(secret),
+                "stream leaked secret: {msg_stream}"
+            );
+        }
+    }
+
+    #[test]
+    fn think_filter_handles_nested_think_and_split_harmony_channels() {
+        let mut filter = ThinkFilter::default();
+        let mut out = String::new();
+        for piece in [
+            "<|start|>assi",
+            "stant<|channel|>anal",
+            "ysis<|message|>secret<|end|><|start|>assistant<|channel|>fin",
+            "al<|constrain|>json<|message|><thi",
+            "nk>outer <think>inner</think> more</th",
+            "ink>Hello<|return|>",
+        ] {
+            out.push_str(&filter.push(piece));
+        }
+        out.push_str(&filter.finish());
+        assert_eq!(out, "Hello");
     }
 }

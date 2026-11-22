@@ -239,8 +239,7 @@ pub(crate) fn run_batch(
         critic_results,
     );
     let call = corrector.complete_json_or_text(&corrector.config.primary_judge_model, &request)?;
-    match parse_judge_reply(&call.text).and_then(|parsed| validate_judge_segments(batch, &parsed))
-    {
+    match parse_judge_reply(&call.text).and_then(|parsed| validate_judge_segments(batch, &parsed)) {
         Ok(texts) => Ok(JudgeBatchResult {
             texts,
             judge_fallback: false,

@@ -374,7 +374,7 @@ impl Engine {
             let agent = http::agent(&self.base, TIMEOUT);
             let reply = http::post_json_with(&agent, &self.url(), &headers, &body)?;
             if !reply.ok() {
-                return Err(reply.status_error().into());
+                return Err(reply.redacted_status_error(self.api_key.as_deref()).into());
             }
             let completion = parse_message(&reply.json()?)?;
             if let Some(usage) = &completion.usage {
@@ -429,7 +429,7 @@ impl Engine {
         let mut stream =
             http::post_stream_with(&agent, &self.url(), &self.headers(fallbacks), &body)?;
         if let Some(error) = stream.error.take() {
-            return Err(error.status_error().into());
+            return Err(error.redacted_status_error(self.api_key.as_deref()).into());
         }
         let mut content = String::new();
         let mut usage = CacheUsage::default();

@@ -7,6 +7,12 @@ use crate::{BackgroundItem, BackgroundKind, EngineEvent, Shared};
 
 const BACKGROUND_ID: &str = "reindex";
 
+fn semantic_indexing_allowed(settings: &lokalbot_core::Settings, missing_embeddings: bool) -> bool {
+    settings.semantic_search_enabled
+        && !crate::post_correction::local_llama_server_disabled(settings)
+        && !missing_embeddings
+}
+
 pub fn start(shared: Arc<Shared>, models: Models) {
     let spawned = std::thread::Builder::new()
         .name("lokalbot-index".into())
@@ -23,9 +29,11 @@ pub fn start(shared: Arc<Shared>, models: Models) {
             while models.runtime_updating() && !shared.is_shutting_down() {
                 std::thread::sleep(Duration::from_secs(1));
             }
-            if !shared.settings().semantic_search_enabled
-                || !models.missing(&models.embedding_requirements()).is_empty()
-            {
+            let settings = shared.settings();
+            if !semantic_indexing_allowed(
+                &settings,
+                !models.missing(&models.embedding_requirements()).is_empty(),
+            ) {
                 return;
             }
             while shared.capture_active.load(Ordering::Relaxed) {
@@ -58,5 +66,30 @@ pub fn start(shared: Arc<Shared>, models: Models) {
         });
     if let Err(err) = spawned {
         log::warn!("could not start search indexing: {err}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::semantic_indexing_allowed;
+
+    #[test]
+    fn semantic_indexing_skips_when_local_llama_server_disabled() {
+        let mut settings = lokalbot_core::Settings {
+            semantic_search_enabled: true,
+            ..Default::default()
+        };
+        assert!(semantic_indexing_allowed(&settings, false));
+        assert!(!semantic_indexing_allowed(&settings, true));
+
+        crate::post_correction::set_local_llama_server_disabled(&mut settings, true);
+        assert!(!semantic_indexing_allowed(&settings, false));
+
+        crate::post_correction::set_local_llama_server_disabled(&mut settings, false);
+        settings.other.insert(
+            "think".into(),
+            serde_json::json!({ "disable_local_llama_server": true }),
+        );
+        assert!(!semantic_indexing_allowed(&settings, false));
     }
 }

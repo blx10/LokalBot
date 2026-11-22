@@ -403,6 +403,24 @@ fn newly_recording(
     after.filter(|folder| before.as_ref() != Some(folder))
 }
 
+fn format_command_for_log(command: &Command) -> String {
+    match command {
+        Command::UpdateSettings(settings) => format!(
+            "UpdateSettings(summarizer={:?}, transcription_model={:?}, local_llama_server_disabled={})",
+            settings.summarizer_backend,
+            settings.transcription_model,
+            post_correction::local_llama_server_disabled(settings),
+        ),
+        other => format!("{other:?}"),
+    }
+}
+
+fn log_engine_command(command: &Command) {
+    if !matches!(command, Command::Autocomplete(_)) {
+        log::debug!("engine command: {}", format_command_for_log(command));
+    }
+}
+
 fn dispatch(shared: Arc<Shared>, commands: Sender<Command>, receiver: Receiver<Command>) {
     let models = models::Models::new(shared.clone());
     models.finish_runtime_update();
@@ -450,9 +468,7 @@ fn dispatch(shared: Arc<Shared>, commands: Sender<Command>, receiver: Receiver<C
     companion::start(shared.clone(), models.clone(), pipeline.clone());
 
     while let Ok(command) = receiver.recv() {
-        if !matches!(command, Command::Autocomplete(_)) {
-            log::debug!("engine command: {command:?}");
-        }
+        log_engine_command(&command);
         match command {
             Command::StartRecording { title, app_name } => {
                 let app_name = app_name.or_else(|| shared.detected_call.lock().clone());
@@ -706,5 +722,79 @@ mod tests {
             super::effective_openai_api_key(&settings).as_deref(),
             Some("config-think-secret-key")
         );
+    }
+
+    struct CaptureLogger {
+        records: parking_lot::Mutex<Vec<String>>,
+    }
+
+    impl log::Log for CaptureLogger {
+        fn enabled(&self, _metadata: &log::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn log(&self, record: &log::Record<'_>) {
+            self.records
+                .lock()
+                .push(format!("[{}] {}", record.level(), record.args()));
+        }
+
+        fn flush(&self) {}
+    }
+
+    static TEST_LOGGER: CaptureLogger = CaptureLogger {
+        records: parking_lot::const_mutex(Vec::new()),
+    };
+    static LOGGER_INIT: std::sync::Once = std::sync::Once::new();
+
+    #[test]
+    fn update_settings_command_log_redacts_api_keys() {
+        LOGGER_INIT.call_once(|| {
+            let _ = log::set_logger(&TEST_LOGGER);
+            log::set_max_level(log::LevelFilter::Debug);
+        });
+        TEST_LOGGER.records.lock().clear();
+
+        let mut settings = lokalbot_core::Settings::default();
+        settings.other.insert(
+            "thinkApiKey".into(),
+            serde_json::json!("sk-top-think-secret-111"),
+        );
+        settings.other.insert(
+            "postCorrection".into(),
+            serde_json::json!({ "apiKey": "sk-top-pc-secret-222" }),
+        );
+        settings.other.insert(
+            "think".into(),
+            serde_json::json!({
+                "api_key": "sk-nested-think-secret-333",
+                "disable_local_llama_server": true
+            }),
+        );
+        settings.other.insert(
+            "transcription".into(),
+            serde_json::json!({
+                "post_correction": { "api_key": "sk-nested-pc-secret-444" }
+            }),
+        );
+
+        let cmd = crate::Command::UpdateSettings(Box::new(settings));
+        let formatted = super::format_command_for_log(&cmd);
+        assert!(formatted.contains("UpdateSettings("));
+        assert!(formatted.contains("local_llama_server_disabled=true"));
+
+        super::log_engine_command(&cmd);
+
+        let logs = TEST_LOGGER.records.lock().join("\n");
+        assert!(logs.contains("engine command: UpdateSettings("));
+        for secret in [
+            "sk-top-think-secret-111",
+            "sk-top-pc-secret-222",
+            "sk-nested-think-secret-333",
+            "sk-nested-pc-secret-444",
+        ] {
+            assert!(!formatted.contains(secret), "formatted leaked {secret}");
+            assert!(!logs.contains(secret), "log leaked {secret}");
+        }
     }
 }

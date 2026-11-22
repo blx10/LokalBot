@@ -67,6 +67,32 @@ impl Reply {
             retry_after: self.retry_after,
         }
     }
+
+    pub fn redacted_status_error(&self, secret: Option<&str>) -> AiError {
+        let mut err = self.status_error();
+        if let AiError::HttpStatus { detail, .. } = &mut err {
+            *detail = redact_secret_detail(detail, secret);
+        }
+        err
+    }
+}
+
+fn redact_secret_detail(text: &str, secret: Option<&str>) -> String {
+    let mut out = crate::sanitize::redact(text);
+    if let Some(secret) = secret {
+        let trimmed = secret.trim();
+        if !trimmed.is_empty() {
+            let bearer_exact = format!("Bearer {trimmed}");
+            out = out.replace(&bearer_exact, "Bearer [REDACTED]");
+            if trimmed.len() >= 6 {
+                out = out.replace(trimmed, "[REDACTED]");
+            }
+        }
+        if !secret.is_empty() && secret != trimmed && secret.len() >= 6 {
+            out = out.replace(secret, "[REDACTED]");
+        }
+    }
+    out
 }
 
 fn unreachable(base: &str, err: ureq::Error) -> anyhow::Error {

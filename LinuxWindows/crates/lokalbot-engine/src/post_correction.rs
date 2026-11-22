@@ -63,7 +63,24 @@ pub fn think_api_key(settings: &Settings) -> Option<String> {
         })
 }
 
+fn remove_nested_keys(settings: &mut Settings, parent: &str, keys: &[&str]) {
+    let remove_parent = match settings.other.get_mut(parent) {
+        Some(Value::Object(map)) => {
+            for key in keys {
+                map.remove(*key);
+            }
+            map.is_empty()
+        }
+        _ => false,
+    };
+    if remove_parent {
+        settings.other.remove(parent);
+    }
+}
+
 pub fn set_think_api_key(settings: &mut Settings, key: Option<&str>) {
+    settings.other.remove("think_api_key");
+    remove_nested_keys(settings, "think", &["apiKey", "api_key"]);
     match key.map(str::trim).filter(|k| !k.is_empty()) {
         Some(k) => {
             settings
@@ -72,7 +89,6 @@ pub fn set_think_api_key(settings: &mut Settings, key: Option<&str>) {
         }
         None => {
             settings.other.remove("thinkApiKey");
-            settings.other.remove("think_api_key");
         }
     }
 }
@@ -104,13 +120,18 @@ pub fn local_llama_server_disabled(settings: &Settings) -> bool {
 }
 
 pub fn set_local_llama_server_disabled(settings: &mut Settings, disabled: bool) {
+    settings.other.remove("disable_local_llama_server");
+    remove_nested_keys(
+        settings,
+        "think",
+        &["disableLocalLlamaServer", "disable_local_llama_server"],
+    );
     if disabled {
         settings
             .other
             .insert("disableLocalLlamaServer".into(), Value::Bool(true));
     } else {
         settings.other.remove("disableLocalLlamaServer");
-        settings.other.remove("disable_local_llama_server");
     }
 }
 
@@ -130,6 +151,12 @@ pub fn post_correction_config(settings: &Settings) -> Option<PostCorrectionConfi
 }
 
 pub fn set_post_correction_config(settings: &mut Settings, config: Option<&PostCorrectionConfig>) {
+    settings.other.remove("post_correction");
+    remove_nested_keys(
+        settings,
+        "transcription",
+        &["postCorrection", "post_correction"],
+    );
     match config {
         Some(cfg) => {
             if let Ok(val) = serde_json::to_value(cfg) {
@@ -138,7 +165,6 @@ pub fn set_post_correction_config(settings: &mut Settings, config: Option<&PostC
         }
         None => {
             settings.other.remove("postCorrection");
-            settings.other.remove("post_correction");
         }
     }
 }
@@ -162,23 +188,42 @@ pub fn save_audit_log(settings: &Settings) -> bool {
             })
         })
         .or_else(|| {
-            settings.other.get("postCorrection").and_then(|pc| {
-                pc.get("saveAuditLog")
-                    .and_then(Value::as_bool)
-                    .or_else(|| pc.get("save_audit_log").and_then(Value::as_bool))
-            })
+            settings
+                .other
+                .get("postCorrection")
+                .or_else(|| settings.other.get("post_correction"))
+                .and_then(|pc| {
+                    pc.get("saveAuditLog")
+                        .and_then(Value::as_bool)
+                        .or_else(|| pc.get("save_audit_log").and_then(Value::as_bool))
+                })
         })
         .unwrap_or(false)
 }
 
 pub fn set_save_audit_log(settings: &mut Settings, save: bool) {
+    settings.other.remove("save_audit_log");
+    remove_nested_keys(
+        settings,
+        "transcription",
+        &["saveAuditLog", "save_audit_log"],
+    );
+    remove_nested_keys(
+        settings,
+        "postCorrection",
+        &["saveAuditLog", "save_audit_log"],
+    );
+    remove_nested_keys(
+        settings,
+        "post_correction",
+        &["saveAuditLog", "save_audit_log"],
+    );
     if save {
         settings
             .other
             .insert("saveAuditLog".into(), Value::Bool(true));
     } else {
         settings.other.remove("saveAuditLog");
-        settings.other.remove("save_audit_log");
     }
 }
 
@@ -439,7 +484,10 @@ mod tests {
             }),
         );
 
-        assert_eq!(think_api_key(&settings).as_deref(), Some("sk-nested-think-key"));
+        assert_eq!(
+            think_api_key(&settings).as_deref(),
+            Some("sk-nested-think-key")
+        );
         assert!(local_llama_server_disabled(&settings));
         assert!(save_audit_log(&settings));
         let pc = post_correction_config(&settings).unwrap();
@@ -512,9 +560,9 @@ mod tests {
                     r#"{"candidates":[{"segment_id":1,"wrong_in_primary":"LocalBOT","suggested_fix":"LokalBot","supported_by":"whisper-turbo-tr-khan","reason":"name"}]}"#,
                 ),
                 "gpt-oss-120b" => chat_json(r#"{"candidates":[]}"#),
-                "Qwen3.8-27B" => {
-                    chat_json(r#"{"segments":[{"segment_id":1,"text":"LokalBot kurulumu"},{"segment_id":2,"text":"ikinci satır"}]}"#)
-                }
+                "Qwen3.8-27B" => chat_json(
+                    r#"{"segments":[{"segment_id":1,"text":"LokalBot kurulumu"},{"segment_id":2,"text":"ikinci satır"}]}"#,
+                ),
                 _ => (404, json!({"error": "unknown"})),
             }
         });
@@ -603,5 +651,99 @@ mod tests {
         .unwrap();
         assert!(ran2);
         assert!(!lib2.meeting_dir(&meeting2).join(AUDIT_FILE_NAME).exists());
+    }
+
+    #[test]
+    fn save_audit_log_supports_snake_case_post_correction_and_clears_nested_keys() {
+        let mut settings = Settings::default();
+        settings.other.insert(
+            "post_correction".into(),
+            json!({ "save_audit_log": true, "enabled": true }),
+        );
+        assert!(save_audit_log(&settings));
+
+        settings.other.insert(
+            "transcription".into(),
+            json!({ "save_audit_log": true, "language": "tr" }),
+        );
+        settings
+            .other
+            .insert("postCorrection".into(), json!({ "saveAuditLog": true }));
+        set_save_audit_log(&mut settings, false);
+        assert!(!save_audit_log(&settings));
+        assert_eq!(
+            settings
+                .other
+                .get("transcription")
+                .and_then(|v| v.get("language"))
+                .and_then(Value::as_str),
+            Some("tr")
+        );
+        assert!(!settings.other.contains_key("postCorrection"));
+
+        settings
+            .other
+            .insert("post_correction".into(), json!({ "save_audit_log": false }));
+        assert!(!save_audit_log(&settings));
+    }
+
+    #[test]
+    fn setters_clear_nested_think_and_transcription_keys() {
+        let mut settings = Settings::default();
+        settings.other.insert(
+            "think".into(),
+            json!({
+                "api_key": "sk-old-nested-think",
+                "disable_local_llama_server": true,
+                "model": "Qwen3.8-27B"
+            }),
+        );
+        settings.other.insert(
+            "transcription".into(),
+            json!({
+                "mode": "asymmetric_multi_stt",
+                "post_correction": {
+                    "enabled": true,
+                    "base_url": "http://127.0.0.1:9999/v1"
+                }
+            }),
+        );
+
+        assert_eq!(
+            think_api_key(&settings).as_deref(),
+            Some("sk-old-nested-think")
+        );
+        assert!(local_llama_server_disabled(&settings));
+        assert!(post_correction_config(&settings).is_some());
+
+        set_think_api_key(&mut settings, None);
+        assert_eq!(think_api_key(&settings), None);
+
+        set_local_llama_server_disabled(&mut settings, false);
+        assert!(!local_llama_server_disabled(&settings));
+
+        set_post_correction_config(&mut settings, None);
+        assert!(post_correction_config(&settings).is_none());
+
+        assert_eq!(
+            settings
+                .other
+                .get("think")
+                .and_then(|v| v.get("model"))
+                .and_then(Value::as_str),
+            Some("Qwen3.8-27B")
+        );
+        assert_eq!(
+            settings
+                .other
+                .get("transcription")
+                .and_then(|v| v.get("mode"))
+                .and_then(Value::as_str),
+            Some("asymmetric_multi_stt")
+        );
+
+        set_think_api_key(&mut settings, Some("sk-new-top"));
+        set_think_api_key(&mut settings, Some("   "));
+        assert_eq!(think_api_key(&settings), None);
     }
 }

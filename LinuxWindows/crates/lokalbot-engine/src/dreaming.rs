@@ -464,7 +464,9 @@ pub fn review_once(
     day: NaiveDate,
 ) -> Result<lokalbot_core::dream::DreamReport> {
     let runtime = lokalbot_ai::runtime::RuntimeManager::new(library.paths().clone(), settings);
-    runtime.set_local_server_disabled(crate::post_correction::local_llama_server_disabled(settings));
+    runtime.set_local_server_disabled(crate::post_correction::local_llama_server_disabled(
+        settings,
+    ));
     let make_engine = || -> Result<(lokalbot_ai::think::ThinkClient, InferenceProvenance)> {
         let client = lokalbot_ai::think::ThinkClient::new(&runtime, settings)?;
         let think = match settings.summarizer_backend {
