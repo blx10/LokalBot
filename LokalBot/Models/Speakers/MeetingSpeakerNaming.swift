@@ -8,6 +8,7 @@ struct MeetingSpeakerNamingVoice: Identifiable, Equatable {
     let speechSeconds: TimeInterval
     let actionCount: Int
     var recognizedName: String?
+    var voiceSuggestions: [SpeakerNameMatch] = []
 }
 
 struct MeetingSpeakerNamingKnown: Identifiable, Equatable {
@@ -21,6 +22,7 @@ struct MeetingSpeakerNamingChoice: Equatable {
     let speaker: String
     let name: String
     var calendarIdentityID: String?
+    var profileID: UUID? = nil
 }
 
 enum MeetingSpeakerNaming {
@@ -29,7 +31,8 @@ enum MeetingSpeakerNaming {
         reviewItems: [MeetingSpeakerReviewItem],
         speechSeconds: [String: TimeInterval],
         recognized: [String: String] = [:],
-        recognizedSpeakers: Set<String> = []
+        recognizedSpeakers: Set<String> = [],
+        voiceSuggestions: [String: [SpeakerNameMatch]] = [:]
     ) -> (voices: [MeetingSpeakerNamingVoice], known: [MeetingSpeakerNamingKnown]) {
         let byID = Dictionary(speakers.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let voices = reviewItems.compactMap { item -> MeetingSpeakerNamingVoice? in
@@ -37,7 +40,8 @@ enum MeetingSpeakerNaming {
             return MeetingSpeakerNamingVoice(
                 id: item.id, label: speaker.name, colorIndex: speaker.colorIndex, sample: item.sample,
                 speechSeconds: speechSeconds[item.id] ?? 0, actionCount: item.actionCount,
-                recognizedName: recognized[item.id])
+                recognizedName: recognized[item.id],
+                voiceSuggestions: voiceSuggestions[item.id] ?? [])
         }
         let known = speakers.filter { !$0.needsName && !$0.isUser }.map {
             MeetingSpeakerNamingKnown(id: $0.id, name: $0.name, colorIndex: $0.colorIndex,
@@ -52,11 +56,17 @@ struct MeetingSpeakerNamingDraft: Equatable {
         var id: String
         var name: String
         var calendarIdentityID: String?
+        var profileID: UUID? = nil
     }
 
     private(set) var picks: [String: Pick] = [:]
     private(set) var typing: Set<String> = []
     var typedNames: [String: String] = [:]
+    var typedProfileIDs: [String: UUID] = [:]
+
+    static func similarityPercent(_ match: SpeakerNameMatch) -> Int {
+        Int((max(0, min(1, match.supportFraction)) * 100).rounded())
+    }
 
     init(voices: [MeetingSpeakerNamingVoice] = [], suggestions: [MeetingSpeakerSuggestion] = []) {
         for voice in voices {
@@ -84,6 +94,7 @@ struct MeetingSpeakerNamingDraft: Equatable {
 
     mutating func toggle(_ pick: Pick, for speaker: String) {
         typing.remove(speaker)
+        typedProfileIDs[speaker] = nil
         if picks[speaker]?.id == pick.id {
             picks[speaker] = nil
             return
@@ -95,6 +106,7 @@ struct MeetingSpeakerNamingDraft: Equatable {
     mutating func typeName(for speaker: String) {
         if typing.contains(speaker) {
             typing.remove(speaker)
+            typedProfileIDs[speaker] = nil
         } else {
             typing.insert(speaker)
             picks[speaker] = nil
@@ -105,11 +117,13 @@ struct MeetingSpeakerNamingDraft: Equatable {
         speakers.compactMap { speaker in
             if typing.contains(speaker) {
                 let name = (typedNames[speaker] ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-                return name.isEmpty ? nil : MeetingSpeakerNamingChoice(speaker: speaker, name: name)
+                return name.isEmpty ? nil : MeetingSpeakerNamingChoice(
+                    speaker: speaker, name: name, profileID: typedProfileIDs[speaker])
             }
             guard let pick = picks[speaker] else { return nil }
             return MeetingSpeakerNamingChoice(speaker: speaker, name: pick.name,
-                                              calendarIdentityID: pick.calendarIdentityID)
+                                              calendarIdentityID: pick.calendarIdentityID,
+                                              profileID: pick.profileID)
         }
     }
 }

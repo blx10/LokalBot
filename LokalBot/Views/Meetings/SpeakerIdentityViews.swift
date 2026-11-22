@@ -106,6 +106,7 @@ struct SpeakerIdentityReview: View {
     let onDeleteEvidence: () -> Void
     var canConfirmIdentity = false
     var microphoneIsUser = false
+    var showsSuggestions = true
     private var assignment: SpeakerIdentityAssignment? { state?.assignments.first { $0.label == speaker } }
 
     private var identityDescription: String {
@@ -139,7 +140,7 @@ struct SpeakerIdentityReview: View {
                 Text("Automatic naming is paused for this speaker.").font(.scaled(.caption)).foregroundStyle(.secondary)
                 Button("Resume automatic identification") { onAction(.resume, nil, nil) }
             }
-            if let candidates = state?.suggestions[speaker], !candidates.isEmpty, assignment?.origin.isProtected != true {
+            if showsSuggestions, let candidates = state?.suggestions[speaker], !candidates.isEmpty, assignment?.origin.isProtected != true {
                 Text("Suggested Names").font(.scaled(.headline))
                 ForEach(candidates) { candidate in
                     VStack(alignment: .leading, spacing: 4) {

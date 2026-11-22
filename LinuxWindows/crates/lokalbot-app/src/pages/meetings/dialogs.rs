@@ -7,8 +7,8 @@ use gpui_kit::component::popover::Popover;
 use gpui_kit::component::{Disableable as _, Icon, Sizable as _, WindowExt as _, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    App, AppContext as _, Context, Entity, FontWeight, IntoElement, ParentElement as _, Render,
-    SharedString, Styled as _, Window, div, px,
+    AnyElement, App, AppContext as _, Context, Entity, FontWeight, IntoElement, ParentElement as _,
+    Render, SharedString, Styled as _, Window, div, px,
 };
 use lokalbot_core::{ActionCorrection, Meeting, Transcript};
 use uuid::Uuid;
@@ -465,6 +465,8 @@ pub(crate) struct NameSpeakerSheet {
     pub(super) suggestions: super::speaker_suggestions::SpeakerSuggestions,
     error: Option<SharedString>,
     pub(super) identity: Option<lokalbot_core::voice::IdentityState>,
+    pub(super) remembered_profiles: Vec<lokalbot_core::voice::VoiceProfile>,
+    pub(super) live_voice_suggestions: Vec<lokalbot_core::voice::NameMatch>,
     pub(super) notice: Option<String>,
     pub(super) profile_id: Option<uuid::Uuid>,
     pub(super) busy: bool,
@@ -479,6 +481,8 @@ impl NameSpeakerSheet {
         transcript: Transcript,
         speaker: ReviewSpeaker,
         identity: Option<lokalbot_core::voice::IdentityState>,
+        remembered_profiles: Vec<lokalbot_core::voice::VoiceProfile>,
+        live_voice_suggestions: Vec<lokalbot_core::voice::NameMatch>,
         notice: Option<String>,
         page: gpui_kit::WeakEntity<super::MeetingsPage>,
         window: &mut Window,
@@ -529,6 +533,8 @@ impl NameSpeakerSheet {
                 suggestions,
                 error: None,
                 identity,
+                remembered_profiles,
+                live_voice_suggestions,
                 notice,
                 profile_id: None,
                 busy: false,
@@ -564,16 +570,8 @@ impl NameSpeakerSheet {
         choice.calendar_identity_id = self.suggestions.identity_for_save();
         let chosen = self.profile_id.take();
         choice.profile_id = chosen.filter(|profile| {
-            self.identity.as_ref().is_some_and(|state| {
-                state
-                    .suggestions
-                    .get(&self.speaker.key)
-                    .is_some_and(|offered| {
-                        offered.iter().any(|m| {
-                            m.profile_id == Some(*profile) && Some(&m.name) == choice.name.as_ref()
-                        })
-                    })
-            })
+            self.matching_profile_name(*profile)
+                .is_some_and(|name| Some(&name) == choice.name.as_ref())
         });
         choice.expected_revision = self.identity.as_ref().map(|state| state.revision);
         self.perform(choice, window, cx);
@@ -723,11 +721,173 @@ impl NameSpeakerSheet {
             .update(cx, |input, cx| input.set_value(name, window, cx));
         cx.notify();
     }
+
+    pub(super) fn voice_matches(&self) -> Vec<lokalbot_core::voice::NameMatch> {
+        let mut combined = self.live_voice_suggestions.clone();
+        if let Some(offered) = self
+            .identity
+            .as_ref()
+            .and_then(|state| state.suggestions.get(&self.speaker.key))
+        {
+            for item in offered {
+                let duplicate = combined.iter().any(|existing| {
+                    (existing.profile_id.is_some() && existing.profile_id == item.profile_id)
+                        || existing.name.eq_ignore_ascii_case(&item.name)
+                });
+                if !duplicate {
+                    combined.push(item.clone());
+                }
+            }
+        }
+        combined
+    }
+
+    fn matching_profile_name(&self, profile: uuid::Uuid) -> Option<String> {
+        self.identity
+            .as_ref()
+            .and_then(|state| state.suggestions.get(&self.speaker.key))
+            .and_then(|offered| offered.iter().find(|m| m.profile_id == Some(profile)))
+            .map(|m| m.name.clone())
+            .or_else(|| {
+                self.live_voice_suggestions
+                    .iter()
+                    .find(|m| m.profile_id == Some(profile))
+                    .map(|m| m.name.clone())
+            })
+            .or_else(|| {
+                self.remembered_profiles
+                    .iter()
+                    .find(|p| p.id == profile)
+                    .map(|p| p.name.clone())
+            })
+    }
+
+    fn filtered_remembered_profiles(
+        &self,
+        voice_matches: &[lokalbot_core::voice::NameMatch],
+        query: &str,
+    ) -> Vec<lokalbot_core::voice::VoiceProfile> {
+        let trimmed = query.trim().to_lowercase();
+        let mut profiles: Vec<_> = self
+            .remembered_profiles
+            .iter()
+            .filter(|person| {
+                let in_voice_matches = voice_matches.iter().any(|m| {
+                    m.profile_id == Some(person.id)
+                        || m.name.eq_ignore_ascii_case(person.name.trim())
+                });
+                if trimmed.is_empty() {
+                    !in_voice_matches
+                } else {
+                    person.name.to_lowercase().contains(&trimmed)
+                }
+            })
+            .cloned()
+            .collect();
+        profiles.sort_by(|a, b| {
+            let a_latest = a.contributions.iter().map(|c| c.confirmed_at).max();
+            let b_latest = b.contributions.iter().map(|c| c.confirmed_at).max();
+            b_latest
+                .cmp(&a_latest)
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        });
+        profiles.truncate(8);
+        profiles
+    }
+
+    fn render_voice_matches(
+        &self,
+        matches: &[lokalbot_core::voice::NameMatch],
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if matches.is_empty() {
+            return None;
+        }
+        let lb = cx.lb().clone();
+        let mut row = h_flex().flex_wrap().gap(px(6.));
+        for (ix, item) in matches.iter().enumerate() {
+            let percent = super::presentation::NamingDraft::similarity_percent(item);
+            let label = format!("{} · {percent}%", item.name);
+            let name = item.name.clone();
+            let profile_id = item.profile_id;
+            let selected = profile_id.is_some() && self.profile_id == profile_id;
+            let mut button = Button::new(("speaker-voice-match", ix))
+                .small()
+                .label(label)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.fill_name(name.clone(), profile_id, window, cx);
+                }));
+            button = if selected {
+                button.primary()
+            } else {
+                button.outline()
+            };
+            row = row.child(button);
+        }
+        Some(
+            v_flex()
+                .gap(px(6.))
+                .child(
+                    div()
+                        .text_size(ty::SECONDARY)
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(lb.text)
+                        .child(lokalbot_i18n::tr("Similar Voices")),
+                )
+                .child(row)
+                .into_any_element(),
+        )
+    }
+
+    fn render_remembered_profiles(
+        &self,
+        profiles: &[lokalbot_core::voice::VoiceProfile],
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if profiles.is_empty() {
+            return None;
+        }
+        let lb = cx.lb().clone();
+        let mut row = h_flex().flex_wrap().gap(px(6.));
+        for (ix, person) in profiles.iter().enumerate() {
+            let name = person.name.clone();
+            let profile_id = person.id;
+            let selected = self.profile_id == Some(profile_id);
+            let mut button = Button::new(("speaker-remembered", ix))
+                .small()
+                .label(person.name.clone())
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.fill_name(name.clone(), Some(profile_id), window, cx);
+                }));
+            button = if selected {
+                button.primary()
+            } else {
+                button.ghost()
+            };
+            row = row.child(button);
+        }
+        Some(
+            v_flex()
+                .gap(px(6.))
+                .child(
+                    div()
+                        .text_size(ty::SECONDARY)
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(lb.text)
+                        .child(lokalbot_i18n::tr("Remembered People")),
+                )
+                .child(row)
+                .into_any_element(),
+        )
+    }
 }
 
 impl Render for NameSpeakerSheet {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let lb = cx.lb().clone();
+        let typed = self.name.read(cx).value().to_string();
+        let voice_matches = self.voice_matches();
+        let remembered = self.filtered_remembered_profiles(&voice_matches, &typed);
         v_flex()
             .gap(px(14.))
             .child(div().text_size(ty::QUESTION).font_weight(FontWeight::BOLD).text_color(lb.text).child(crate::ui::text::paragraph(lokalbot_i18n::tr("Name Speaker"))))
@@ -759,10 +919,9 @@ impl Render for NameSpeakerSheet {
                     .child(div().text_size(ty::SECONDARY).text_color(lb.text_secondary).child(crate::ui::text::paragraph(lokalbot_i18n::tr("Name"))))
                     .child(Input::new(&self.name)),
             )
-            .children({
-                let name = self.name.read(cx).value().to_string();
-                self.suggestions.render(&name, cx)
-            })
+            .children(self.render_voice_matches(&voice_matches, cx))
+            .children(self.render_remembered_profiles(&remembered, cx))
+            .children(self.suggestions.render(&typed, cx))
             .child(self.render_identity_review(cx))
             .child(
                 h_flex()

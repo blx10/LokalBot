@@ -4,6 +4,7 @@ struct MeetingSpeakerNamingSheet: View {
     let voices: [MeetingSpeakerNamingVoice]
     let known: [MeetingSpeakerNamingKnown]
     let suggestions: [MeetingSpeakerSuggestion]
+    let rememberedPeople: [SpeakerVoiceProfile]
     let assignedCalendarIdentityIDs: Set<String>
     let canPlay: Bool
     let busy: Bool
@@ -19,13 +20,15 @@ struct MeetingSpeakerNamingSheet: View {
     @Environment(\.locale) private var locale
 
     init(voices: [MeetingSpeakerNamingVoice], known: [MeetingSpeakerNamingKnown],
-         suggestions: [MeetingSpeakerSuggestion], assignedCalendarIdentityIDs: Set<String>,
+         suggestions: [MeetingSpeakerSuggestion], rememberedPeople: [SpeakerVoiceProfile] = [],
+         assignedCalendarIdentityIDs: Set<String>,
          canPlay: Bool, busy: Bool, notice: String?,
          onPlay: @escaping (Transcript.Segment) -> Void, onChange: @escaping (String) -> Void,
          onSave: @escaping ([MeetingSpeakerNamingChoice]) -> Void, onCancel: @escaping () -> Void) {
         self.voices = voices
         self.known = known
         self.suggestions = suggestions
+        self.rememberedPeople = rememberedPeople
         self.assignedCalendarIdentityIDs = assignedCalendarIdentityIDs
         self.canPlay = canPlay
         self.busy = busy
@@ -137,7 +140,27 @@ struct MeetingSpeakerNamingSheet: View {
                 }
                 MeetingWrappingRow(spacing: 6, lineSpacing: 6) {
                     let named = suggestions.filter { $0.name != nil }
-                    if let recognized = voice.recognizedName {
+                    let voiceMatches = voice.voiceSuggestions
+                    if !voiceMatches.isEmpty {
+                        Text("Similar voice")
+                            .font(AppFont.scaled(.callout))
+                            .foregroundStyle(Color(nsColor: WorkspaceTextColor.supporting))
+                        ForEach(voiceMatches) { match in
+                            let percent = MeetingSpeakerNamingDraft.similarityPercent(match)
+                            let recognizedPick = voice.recognizedName.flatMap { recognized -> MeetingSpeakerNamingDraft.Pick? in
+                                guard ParticipantObservation.nameKey(recognized) == ParticipantObservation.nameKey(match.name) else { return nil }
+                                var pick = MeetingSpeakerNamingDraft.recognizedPick(recognized, for: voice.id, among: suggestions)
+                                pick.profileID = match.profileID
+                                return pick
+                            }
+                            let pick = recognizedPick ?? MeetingSpeakerNamingDraft.Pick(
+                                id: "voice:\(match.id)", name: match.name, profileID: match.profileID)
+                            chip(Text(verbatim: "\(match.name) · \(percent)%"), pick: pick, voice: voice,
+                                 identifier: "meeting.naming.voiceMatch.\(voice.id).\(match.id)")
+                                .opacity(draft.isTakenElsewhere(pick.id, for: voice.id) ? 0.45 : 1)
+                                .help(match.explanation)
+                        }
+                    } else if let recognized = voice.recognizedName {
                         let pick = MeetingSpeakerNamingDraft.recognizedPick(
                             recognized, for: voice.id, among: suggestions)
                         if !named.contains(where: { $0.id == pick.id }) {
@@ -159,6 +182,21 @@ struct MeetingSpeakerNamingSheet: View {
                              identifier: "meeting.naming.choice.\(voice.id).\(suggestion.id)")
                             .opacity(isUsed(suggestion, by: voice) ? 0.45 : 1)
                     }
+                    let quickRemembered = quickPickProfiles(excluding: named, voiceMatches: voiceMatches)
+                    if !quickRemembered.isEmpty {
+                        Text("Remembered")
+                            .font(AppFont.scaled(.callout))
+                            .foregroundStyle(Color(nsColor: WorkspaceTextColor.supporting))
+                        ForEach(quickRemembered) { person in
+                            let pick = MeetingSpeakerNamingDraft.Pick(
+                                id: "profile:\(person.id.uuidString)",
+                                name: person.name,
+                                profileID: person.id)
+                            chip(Text(verbatim: person.name), pick: pick, voice: voice,
+                                 identifier: "meeting.naming.profile.\(voice.id).\(person.id.uuidString)")
+                                .opacity(draft.isTakenElsewhere(pick.id, for: voice.id) ? 0.45 : 1)
+                        }
+                    }
                     Button { beginTyping(voice) } label: { Text("Someone else…") }
                         .buttonStyle(MeetingNameChipStyle(selected: draft.isTyping(for: voice.id)))
                         .accessibilityIdentifier("meeting.naming.other.\(voice.id)")
@@ -166,11 +204,33 @@ struct MeetingSpeakerNamingSheet: View {
                 if draft.isTyping(for: voice.id) {
                     TextField("Speaker name", text: Binding(
                         get: { draft.typedNames[voice.id] ?? "" },
-                        set: { draft.typedNames[voice.id] = $0 }), prompt: Text("Name this speaker"))
+                        set: { newValue in
+                            draft.typedNames[voice.id] = newValue
+                            if let pid = draft.typedProfileIDs[voice.id],
+                               let person = rememberedPeople.first(where: { $0.id == pid }),
+                               ParticipantObservation.nameKey(person.name) != ParticipantObservation.nameKey(newValue) {
+                                draft.typedProfileIDs[voice.id] = nil
+                            }
+                        }), prompt: Text("Name this speaker"))
                         .textFieldStyle(.roundedBorder)
                         .frame(maxWidth: 280)
                         .focused($focusedVoice, equals: voice.id)
                         .accessibilityIdentifier("meeting.naming.name.\(voice.id)")
+                    let matches = matchingProfiles(for: draft.typedNames[voice.id] ?? "")
+                    if !matches.isEmpty {
+                        MeetingWrappingRow(spacing: 6, lineSpacing: 4) {
+                            ForEach(matches) { person in
+                                Button {
+                                    draft.typedNames[voice.id] = person.name
+                                    draft.typedProfileIDs[voice.id] = person.id
+                                } label: {
+                                    Text(verbatim: person.name).lineLimit(1)
+                                }
+                                .buttonStyle(MeetingNameChipStyle(selected: draft.typedProfileIDs[voice.id] == person.id))
+                                .accessibilityIdentifier("meeting.naming.autocomplete.\(voice.id).\(person.id.uuidString)")
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -228,6 +288,38 @@ struct MeetingSpeakerNamingSheet: View {
     private func beginTyping(_ voice: MeetingSpeakerNamingVoice) {
         draft.typeName(for: voice.id)
         focusedVoice = draft.isTyping(for: voice.id) ? voice.id : nil
+    }
+
+    private var sortedRememberedPeople: [SpeakerVoiceProfile] {
+        rememberedPeople.sorted { lhs, rhs in
+            if lhs.contributions.count != rhs.contributions.count {
+                return lhs.contributions.count > rhs.contributions.count
+            }
+            return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+        }
+    }
+
+    private func quickPickProfiles(
+        excluding named: [MeetingSpeakerSuggestion],
+        voiceMatches: [SpeakerNameMatch]
+    ) -> [SpeakerVoiceProfile] {
+        var existing = Set(named.compactMap(\.name).map(MeetingSpeakerSuggestion.nameKey))
+        for match in voiceMatches {
+            existing.insert(MeetingSpeakerSuggestion.nameKey(match.name))
+        }
+        return Array(sortedRememberedPeople.filter {
+            existing.insert(MeetingSpeakerSuggestion.nameKey($0.name)).inserted
+        }.prefix(8))
+    }
+
+    private func matchingProfiles(for rawQuery: String) -> [SpeakerVoiceProfile] {
+        let query = rawQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return Array(sortedRememberedPeople.prefix(6)) }
+        let words = ParticipantObservation.nameKey(query).split(whereSeparator: \.isWhitespace)
+        return Array(sortedRememberedPeople.filter { profile in
+            let haystack = ParticipantObservation.nameKey(profile.name)
+            return words.allSatisfy { haystack.contains($0) }
+        }.prefix(6))
     }
 }
 

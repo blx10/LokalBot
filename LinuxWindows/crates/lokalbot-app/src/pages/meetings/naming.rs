@@ -31,6 +31,7 @@ pub(crate) struct NamingSheet {
     voices: Vec<NamingVoice>,
     known: Vec<NamingKnown>,
     suggestions: Vec<SpeakerSuggestion>,
+    remembered_people: Vec<lokalbot_core::voice::VoiceProfile>,
     assigned: HashSet<String>,
     draft: NamingDraft,
     typed: HashMap<String, Entity<InputState>>,
@@ -64,6 +65,7 @@ impl NamingSheet {
             &doc.speech,
             &recognized,
             &doc.recognized_before,
+            &doc.live_voice_suggestions,
         );
         let draft = NamingDraft::new(&voices, &doc.suggestions);
         let assigned = transcript
@@ -78,6 +80,7 @@ impl NamingSheet {
             voices,
             known,
             suggestions: doc.suggestions.clone(),
+            remembered_people: doc.remembered_profiles.clone(),
             assigned,
             draft,
             typed: HashMap::new(),
@@ -119,9 +122,19 @@ impl NamingSheet {
                             cx,
                         ))
                     });
-                    cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
+                    cx.subscribe_in(&input, window, |this, input, event: &InputEvent, window, cx| {
                         match event {
-                            InputEvent::Change => cx.notify(),
+                            InputEvent::Change => {
+                                let typed = input.read(cx).value().to_string();
+                                let key_match = SpeakerSuggestion::name_key(&typed);
+                                this.draft.typed_profile_ids.retain(|_, pid| {
+                                    this.remembered_people.iter().any(|p| {
+                                        p.id == *pid
+                                            && SpeakerSuggestion::name_key(&p.name) == key_match
+                                    })
+                                });
+                                cx.notify();
+                            }
                             InputEvent::PressEnter { .. } => this.save(window, cx),
                             _ => {}
                         }
@@ -185,6 +198,9 @@ impl NamingSheet {
                         let mut decision =
                             Choice::new(&choice.speaker, Some(choice.name), DecisionAction::Assign);
                         decision.calendar_identity_id = choice.calendar_identity_id;
+                        if current.can_confirm_speaker(&choice.speaker) {
+                            decision.profile_id = choice.profile_id;
+                        }
                         current = lokalbot_engine::voice::save_choice(
                             &library, &decision, &meeting, &current,
                         )?;
@@ -271,7 +287,49 @@ impl NamingSheet {
             .filter(|s| s.name.is_some())
             .collect();
         let mut chips: Vec<AnyElement> = Vec::new();
-        if let Some(recognized) = &voice.recognized_name {
+        if !voice.voice_suggestions.is_empty() {
+            chips.push(
+                div()
+                    .text_size(ty::SECONDARY)
+                    .text_color(lb.supporting)
+                    .child(lokalbot_i18n::tr("Similar voice"))
+                    .into_any_element(),
+            );
+            for (match_ix, found) in voice.voice_suggestions.iter().enumerate() {
+                let percent = NamingDraft::similarity_percent(found);
+                let pick = voice
+                    .recognized_name
+                    .as_ref()
+                    .filter(|rec| {
+                        SpeakerSuggestion::name_key(rec)
+                            == SpeakerSuggestion::name_key(&found.name)
+                    })
+                    .map(|rec| {
+                        let mut pick =
+                            presentation::recognized_pick(rec, &voice.key, &self.suggestions);
+                        pick.profile_id = found.profile_id;
+                        pick
+                    })
+                    .unwrap_or_else(|| Pick {
+                        id: found
+                            .profile_id
+                            .map(|id| format!("voice:{id}"))
+                            .unwrap_or_else(|| format!("voice:{}", found.participant_reference)),
+                        name: found.name.clone(),
+                        calendar_identity_id: None,
+                        profile_id: found.profile_id,
+                    });
+                let dimmed = self.draft.is_taken_elsewhere(&pick.id, &voice.key);
+                chips.push(self.chip(
+                    format!("naming-voice-match-{ix}-{match_ix}").into(),
+                    format!("{} · {percent}%", found.name),
+                    pick,
+                    &voice.key,
+                    dimmed,
+                    cx,
+                ));
+            }
+        } else if let Some(recognized) = &voice.recognized_name {
             let pick = presentation::recognized_pick(recognized, &voice.key, &self.suggestions);
             if !named.iter().any(|s| s.id == pick.id) {
                 let tooltip: SharedString =
@@ -306,6 +364,7 @@ impl NamingSheet {
                 id: suggestion.id.clone(),
                 name: suggestion.name.clone().unwrap_or_default(),
                 calendar_identity_id: suggestion.calendar.as_ref().map(|guest| guest.id.clone()),
+                profile_id: None,
             };
             let dimmed = self.is_used(suggestion, &voice.key);
             chips.push(self.chip(
@@ -316,6 +375,33 @@ impl NamingSheet {
                 dimmed,
                 cx,
             ));
+        }
+        let quick_remembered = self.quick_pick_profiles(&named, &voice.voice_suggestions);
+        if !quick_remembered.is_empty() {
+            chips.push(
+                div()
+                    .text_size(ty::SECONDARY)
+                    .text_color(lb.supporting)
+                    .child(lokalbot_i18n::tr("Remembered"))
+                    .into_any_element(),
+            );
+            for (person_ix, person) in quick_remembered.iter().enumerate() {
+                let pick = Pick {
+                    id: format!("profile:{}", person.id),
+                    name: person.name.clone(),
+                    calendar_identity_id: None,
+                    profile_id: Some(person.id),
+                };
+                let dimmed = self.draft.is_taken_elsewhere(&pick.id, &voice.key);
+                chips.push(self.chip(
+                    format!("naming-profile-{ix}-{person_ix}").into(),
+                    person.name.clone(),
+                    pick,
+                    &voice.key,
+                    dimmed,
+                    cx,
+                ));
+            }
         }
         let typing = self.draft.is_typing(&voice.key);
         let key = voice.key.clone();
@@ -404,11 +490,104 @@ impl NamingSheet {
                     .when_some(
                         self.typed.get(&voice.key).filter(|_| typing).cloned(),
                         |this, input| {
-                            this.child(div().max_w(px(280.)).child(Input::new(&input).small()))
+                            let query = input.read(cx).value().to_string();
+                            let matches = self.matching_profiles(&query);
+                            let speaker_key = voice.key.clone();
+                            this.child(
+                                v_flex()
+                                    .gap(px(6.))
+                                    .child(div().max_w(px(280.)).child(Input::new(&input).small()))
+                                    .when(!matches.is_empty(), |col| {
+                                        col.child(
+                                            h_flex().flex_wrap().gap(px(6.)).children(
+                                                matches.into_iter().enumerate().map(|(m_ix, person)| {
+                                                    let selected = self
+                                                        .draft
+                                                        .typed_profile_ids
+                                                        .get(&speaker_key)
+                                                        == Some(&person.id);
+                                                    let speaker_for_click = speaker_key.clone();
+                                                    let input_for_click = input.clone();
+                                                    let person_name = person.name.clone();
+                                                    let person_id = person.id;
+                                                    name_chip(
+                                                        format!("naming-auto-{ix}-{m_ix}").into(),
+                                                        person.name.clone(),
+                                                        selected,
+                                                        cx,
+                                                    )
+                                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                                        this.draft.typed_profile_ids.insert(
+                                                            speaker_for_click.clone(),
+                                                            person_id,
+                                                        );
+                                                        input_for_click.update(cx, |state, cx| {
+                                                            state.set_value(
+                                                                person_name.clone(),
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        });
+                                                        cx.notify();
+                                                    }))
+                                                    .into_any_element()
+                                                }),
+                                            ),
+                                        )
+                                    }),
+                            )
                         },
                     ),
             )
             .into_any_element()
+    }
+
+    fn sorted_profiles(&self) -> Vec<lokalbot_core::voice::VoiceProfile> {
+        let mut profiles = self.remembered_people.clone();
+        profiles.sort_by(|a, b| {
+            b.contributions
+                .len()
+                .cmp(&a.contributions.len())
+                .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
+        });
+        profiles
+    }
+
+    fn quick_pick_profiles(
+        &self,
+        named: &[&SpeakerSuggestion],
+        voice_matches: &[lokalbot_core::voice::NameMatch],
+    ) -> Vec<lokalbot_core::voice::VoiceProfile> {
+        let mut existing: HashSet<String> = named
+            .iter()
+            .filter_map(|s| s.name.as_deref().map(SpeakerSuggestion::name_key))
+            .collect();
+        for found in voice_matches {
+            existing.insert(SpeakerSuggestion::name_key(&found.name));
+        }
+        self.sorted_profiles()
+            .into_iter()
+            .filter(|p| existing.insert(SpeakerSuggestion::name_key(&p.name)))
+            .take(8)
+            .collect()
+    }
+
+    fn matching_profiles(&self, raw_query: &str) -> Vec<lokalbot_core::voice::VoiceProfile> {
+        let trimmed = raw_query.trim();
+        let profiles = self.sorted_profiles();
+        if trimmed.is_empty() {
+            return profiles.into_iter().take(6).collect();
+        }
+        let needle = lokalbot_core::voice::name_key(trimmed);
+        let words: Vec<&str> = needle.split_whitespace().collect();
+        profiles
+            .into_iter()
+            .filter(|p| {
+                let hay = lokalbot_core::voice::name_key(&p.name);
+                words.iter().all(|word| hay.contains(word))
+            })
+            .take(6)
+            .collect()
     }
 
     fn known_row(&self, ix: usize, known: &NamingKnown, cx: &mut Context<Self>) -> AnyElement {

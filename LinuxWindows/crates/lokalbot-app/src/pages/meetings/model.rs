@@ -30,6 +30,9 @@ pub struct MeetingDoc {
     pub rows: Vec<TranscriptRow>,
     pub review: Vec<ReviewSpeaker>,
     pub identity: Option<lokalbot_core::voice::IdentityState>,
+    pub remembered_profiles: Vec<lokalbot_core::voice::VoiceProfile>,
+    pub live_voice_suggestions:
+        std::collections::BTreeMap<String, Vec<lokalbot_core::voice::NameMatch>>,
     pub speaker_notice: Option<String>,
     pub recognized: Vec<(String, lokalbot_core::voice::NameMatch)>,
     pub notes_need_refresh: bool,
@@ -416,6 +419,12 @@ pub fn load(library: &Library, meeting: Meeting) -> MeetingDoc {
         .is_file()
         .then(|| memory.state(&meeting).ok())
         .flatten();
+    let remembered_profiles = memory.profiles().unwrap_or_default();
+    let live_voice_suggestions = lokalbot_core::voice::live_suggestions(
+        identity.as_ref(),
+        transcript.as_ref(),
+        &remembered_profiles,
+    );
     let recognized = transcript
         .as_ref()
         .map(|t| lokalbot_core::voice::recognized_speakers(identity.as_ref(), t))
@@ -485,6 +494,8 @@ pub fn load(library: &Library, meeting: Meeting) -> MeetingDoc {
         invited,
         recognized_before,
         identity,
+        remembered_profiles,
+        live_voice_suggestions,
         speaker_notice,
         recognized,
         notes_need_refresh,

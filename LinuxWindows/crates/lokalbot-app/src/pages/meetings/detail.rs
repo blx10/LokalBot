@@ -1932,8 +1932,13 @@ impl MeetingsPage {
             self.data.clone(),
             doc.meeting.clone(),
             transcript,
-            speaker,
+            speaker.clone(),
             doc.identity.clone(),
+            doc.remembered_profiles.clone(),
+            doc.live_voice_suggestions
+                .get(&speaker.key)
+                .cloned()
+                .unwrap_or_default(),
             doc.speaker_notice.clone(),
             cx.entity().downgrade(),
             window,

@@ -94,4 +94,41 @@ final class MeetingSpeakerNamingTests: XCTestCase {
         XCTAssertFalse(draft.isTyping(for: "them 2"))
         XCTAssertEqual(draft.choices(for: ["them 2"]), [.init(speaker: "them 2", name: "Ana")])
     }
+
+    func testVoiceSuggestionsAndProfileIDsPropagateToChoices() {
+        let profileID = UUID()
+        let match = SpeakerNameMatch(
+            name: "Alper",
+            participantReference: profileID.uuidString,
+            tier: .suggested,
+            source: .profile,
+            supportSeconds: 12,
+            independentTurns: 2,
+            supportFraction: 0.684,
+            contradictionSeconds: 0,
+            evidence: [],
+            profileID: profileID)
+        XCTAssertEqual(MeetingSpeakerNamingDraft.similarityPercent(match), 68)
+        let lists = MeetingSpeakerNaming.lists(
+            speakers: MeetingDetailPresentation.speakers(
+                in: transcript, presentation: MeetingSpeakerPresentation(transcript: transcript)),
+            reviewItems: MeetingSpeakerReviewItem.items(in: transcript),
+            speechSeconds: MeetingDetailPresentation.speechSeconds(in: transcript),
+            voiceSuggestions: ["them 2": [match]])
+        XCTAssertEqual(lists.voices.first?.voiceSuggestions.first?.profileID, profileID)
+
+        var draft = MeetingSpeakerNamingDraft(voices: lists.voices, suggestions: [])
+        draft.toggle(.init(id: "voice:\(match.id)", name: match.name, profileID: profileID), for: "them 2")
+        XCTAssertEqual(draft.choices(for: ["them 2"]), [
+            .init(speaker: "them 2", name: "Alper", profileID: profileID),
+        ])
+
+        draft.typeName(for: "them 3")
+        draft.typedNames["them 3"] = "Alper"
+        draft.typedProfileIDs["them 3"] = profileID
+        XCTAssertEqual(draft.choices(for: ["them 2", "them 3"]), [
+            .init(speaker: "them 2", name: "Alper", profileID: profileID),
+            .init(speaker: "them 3", name: "Alper", profileID: profileID),
+        ])
+    }
 }

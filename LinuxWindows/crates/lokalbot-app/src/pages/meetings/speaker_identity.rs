@@ -202,7 +202,7 @@ impl NameSpeakerSheet {
             .as_ref()
             .and_then(|state| state.suggestions.get(&speaker).cloned())
             .unwrap_or_default();
-        if !candidates.is_empty() && !protected {
+        if !candidates.is_empty() && !protected && self.voice_matches().is_empty() {
             out = out.child(Self::heading("Suggested Names", cx));
             for (ix, candidate) in candidates.into_iter().enumerate() {
                 let name = candidate.name.clone();

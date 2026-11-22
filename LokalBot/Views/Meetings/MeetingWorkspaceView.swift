@@ -159,6 +159,7 @@ private struct MeetingWorkspaceDetail: View {
     @State private var derived = MeetingTranscriptDerived()
     @State private var speakerRenameDraft: WorkspaceSpeakerRenameDraft?
     @State private var speakerIdentityState: MeetingSpeakerIdentityState?
+    @State private var rememberedProfiles: [SpeakerVoiceProfile] = []
     @State private var speakerIdentityNotice: String?
     @State private var savingSpeakerIdentity = false
     @State private var speakerSummaryNeedsRefresh = false
@@ -369,6 +370,8 @@ private struct MeetingWorkspaceDetail: View {
                 draft: draft,
                 hints: speakerNameHints,
                 calendarCandidates: calendarCandidates(for: draft.speaker),
+                rememberedPeople: rememberedProfiles,
+                voiceSuggestions: liveVoiceSuggestions[Transcript.canonicalSpeakerKey(draft.speaker)] ?? [],
                 assignedCalendarIdentityIDs: assignedCalendarIdentityIDs,
                 identityState: speakerIdentityState,
                 notice: speakerIdentityNotice,
@@ -1441,6 +1444,13 @@ private struct MeetingWorkspaceDetail: View {
         return MeetingSpeakerIdentityService.recognizedSpeakers(in: speakerIdentityState, transcript: transcript)
     }
 
+    private var liveVoiceSuggestions: [String: [SpeakerNameMatch]] {
+        MeetingSpeakerIdentityService.liveSuggestions(
+            for: speakerIdentityState,
+            transcript: transcript,
+            profiles: rememberedProfiles)
+    }
+
     private var namingSheet: some View {
         let actions = shownProjection?.actionReferences.map(\.effectiveAction) ?? []
         let recognized = Dictionary(recognizedSpeakers.map { ($0.label, $0.match.name) },
@@ -1452,11 +1462,13 @@ private struct MeetingWorkspaceDetail: View {
             reviewItems: MeetingSpeakerReviewItem.prioritized(reviewSpeakers, actions: actions),
             speechSeconds: derived.speechSeconds,
             recognized: recognized,
-            recognizedSpeakers: recognizedBefore)
+            recognizedSpeakers: recognizedBefore,
+            voiceSuggestions: liveVoiceSuggestions)
         return MeetingSpeakerNamingSheet(
             voices: lists.voices,
             known: lists.known,
             suggestions: MeetingSpeakerSuggestion.choices(calendar: calendarSpeakerCandidates, hints: speakerNameHints),
+            rememberedPeople: rememberedProfiles,
             assignedCalendarIdentityIDs: assignedCalendarIdentityIDs,
             canPlay: player.isLoaded,
             busy: savingSpeakerIdentity,
@@ -1477,8 +1489,11 @@ private struct MeetingWorkspaceDetail: View {
             defer { savingSpeakerIdentity = false }
             do {
                 for choice in choices {
+                    let profileID = current.canConfirmSpeaker(choice.speaker) ? choice.profileID : nil
                     current = try await app.speakerIdentity.choose(
-                        .init(label: choice.speaker, name: choice.name, calendarIdentityID: choice.calendarIdentityID),
+                        .init(label: choice.speaker, name: choice.name,
+                              calendarIdentityID: choice.calendarIdentityID,
+                              profileID: profileID),
                         meeting: meeting, transcript: current)
                 }
                 try app.saveTranscript(current, for: meeting)
@@ -1503,6 +1518,7 @@ private struct MeetingWorkspaceDetail: View {
     private func refreshSpeakerIdentity(recover: Bool = false) async {
         do {
             speakerIdentityState = try await app.speakerIdentity.state(for: meeting)
+            rememberedProfiles = (try? await app.speakerIdentity.profiles()) ?? []
             let latestChoice = speakerIdentityState?.decisions.filter {
                 $0.action.changesAttribution
             }.map(\.confirmedAt).max()
@@ -2007,6 +2023,8 @@ private struct WorkspaceSpeakerRenameSheet: View {
     let draft: WorkspaceSpeakerRenameDraft
     let hints: [String]
     let calendarCandidates: [CalendarParticipantIdentity]
+    let rememberedPeople: [SpeakerVoiceProfile]
+    let voiceSuggestions: [SpeakerNameMatch]
     let assignedCalendarIdentityIDs: Set<String>
     let identityState: MeetingSpeakerIdentityState?
     let notice: String?
@@ -2030,6 +2048,8 @@ private struct WorkspaceSpeakerRenameSheet: View {
         draft: WorkspaceSpeakerRenameDraft,
         hints: [String],
         calendarCandidates: [CalendarParticipantIdentity],
+        rememberedPeople: [SpeakerVoiceProfile] = [],
+        voiceSuggestions: [SpeakerNameMatch] = [],
         assignedCalendarIdentityIDs: Set<String>,
         identityState: MeetingSpeakerIdentityState?,
         notice: String?,
@@ -2045,6 +2065,8 @@ private struct WorkspaceSpeakerRenameSheet: View {
         self.draft = draft
         self.hints = hints
         self.calendarCandidates = calendarCandidates
+        self.rememberedPeople = rememberedPeople
+        self.voiceSuggestions = voiceSuggestions
         self.assignedCalendarIdentityIDs = assignedCalendarIdentityIDs
         self.identityState = identityState
         self.notice = notice
@@ -2094,12 +2116,25 @@ private struct WorkspaceSpeakerRenameSheet: View {
                     .textFieldStyle(.roundedBorder)
                     .focused($nameFocused)
                     .onSubmit {
-                        if let match = returnSuggestion { choose(match) } else { save() }
+                        if let match = returnSuggestion {
+                            choose(match)
+                        } else if let person = returnRememberedPerson {
+                            chooseRemembered(person)
+                        } else {
+                            save()
+                        }
                     }
                     .accessibilityIdentifier("speaker.rename.name")
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
+                    if !voiceSuggestions.isEmpty {
+                        Text("Similar Voices")
+                            .font(.scaled(.headline))
+                        ForEach(voiceSuggestions) { match in
+                            voiceSuggestionRow(match)
+                        }
+                    }
                     if !suggestions.isEmpty {
                         Text("Suggested Names")
                             .font(.scaled(.headline))
@@ -2110,7 +2145,7 @@ private struct WorkspaceSpeakerRenameSheet: View {
                         ForEach(visibleSuggestions) { suggestion in
                             suggestionRow(suggestion, isReturnTarget: suggestion.id == returnID)
                         }
-                        if visibleSuggestions.isEmpty {
+                        if visibleSuggestions.isEmpty && visibleRememberedPeople.isEmpty {
                             Text("No suggested names match this search.")
                                 .workspaceTextRole(.supporting)
                                 .accessibilityIdentifier("speaker.rename.noMatchingSuggestions")
@@ -2121,11 +2156,24 @@ private struct WorkspaceSpeakerRenameSheet: View {
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                     }
+                    if !visibleRememberedPeople.isEmpty {
+                        Text("Remembered People")
+                            .font(.scaled(.headline))
+                        let returnPersonID = returnSuggestion == nil ? returnRememberedPerson?.id : nil
+                        ForEach(visibleRememberedPeople) { person in
+                            rememberedPersonRow(person, isReturnTarget: person.id == returnPersonID)
+                        }
+                    } else if suggestions.isEmpty && !nameQuery.isEmpty && !rememberedPeople.isEmpty {
+                        Text("No suggested names match this search.")
+                            .workspaceTextRole(.supporting)
+                            .accessibilityIdentifier("speaker.rename.noMatchingSuggestions")
+                    }
 
                     SpeakerIdentityReview(speaker: draft.speaker, state: identityState,
                         name: $name, profileID: $profileID,
                         onPlay: onPlayEvidence, onAction: onAction, onDeleteEvidence: onDeleteEvidence,
-                        canConfirmIdentity: draft.canConfirmIdentity, microphoneIsUser: draft.microphoneIsUser)
+                        canConfirmIdentity: draft.canConfirmIdentity, microphoneIsUser: draft.microphoneIsUser,
+                        showsSuggestions: false)
                     if let notice { Text(notice).font(.scaled(.caption)).foregroundStyle(.secondary) }
                 }
                 .onGeometryChange(for: CGFloat.self) { $0.size.height } action: {
@@ -2148,7 +2196,7 @@ private struct WorkspaceSpeakerRenameSheet: View {
                 Button("Save", action: save)
                     .primaryActionButton()
                     .disabled(nameIsBlank)
-                    .keyboardShortcut(returnSuggestion == nil ? .defaultAction : nil)
+                    .keyboardShortcut(returnSuggestion == nil && returnRememberedPerson == nil ? .defaultAction : nil)
                     .accessibilityIdentifier("speaker.rename.save")
             }
         }
@@ -2164,6 +2212,40 @@ private struct WorkspaceSpeakerRenameSheet: View {
 
     private var suggestions: [MeetingSpeakerSuggestion] {
         MeetingSpeakerSuggestion.choices(calendar: calendarCandidates, hints: hints)
+    }
+
+    private var sortedRememberedPeople: [SpeakerVoiceProfile] {
+        rememberedPeople.sorted { lhs, rhs in
+            if lhs.contributions.count != rhs.contributions.count {
+                return lhs.contributions.count > rhs.contributions.count
+            }
+            return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+        }
+    }
+
+    private var visibleRememberedPeople: [SpeakerVoiceProfile] {
+        let query = nameQuery
+        if query.isEmpty {
+            var existing = Set(suggestions.compactMap(\.name).map(MeetingSpeakerSuggestion.nameKey))
+            for match in voiceSuggestions {
+                existing.insert(MeetingSpeakerSuggestion.nameKey(match.name))
+            }
+            return Array(sortedRememberedPeople.filter {
+                existing.insert(MeetingSpeakerSuggestion.nameKey($0.name)).inserted
+            }.prefix(12))
+        }
+        let words = ParticipantObservation.nameKey(query).split(whereSeparator: \.isWhitespace)
+        return Array(sortedRememberedPeople.filter { person in
+            if isRememberedChosen(person) { return true }
+            let haystack = ParticipantObservation.nameKey(person.name)
+            return words.allSatisfy { haystack.contains($0) }
+        }.prefix(12))
+    }
+
+    private var returnRememberedPerson: SpeakerVoiceProfile? {
+        let query = nameQuery
+        guard !query.isEmpty else { return nil }
+        return visibleRememberedPeople.first { !isRememberedChosen($0) }
     }
 
     private var nameBinding: Binding<String> {
@@ -2197,11 +2279,16 @@ private struct WorkspaceSpeakerRenameSheet: View {
             == MeetingSpeakerSuggestion.nameKey(name)
     }
 
+    private func isRememberedChosen(_ person: SpeakerVoiceProfile) -> Bool {
+        selectedCalendarIdentityID == nil && (profileID == person.id
+            || MeetingSpeakerSuggestion.nameKey(person.name) == MeetingSpeakerSuggestion.nameKey(name))
+    }
+
     private var nameIsBlank: Bool { name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
     private func save() {
         guard !nameIsBlank else { return }
-        onSave(name, selectedCalendarIdentityID, profileID)
+        onSave(name, selectedCalendarIdentityID, draft.canConfirmIdentity ? profileID : nil)
     }
 
     private func choose(_ suggestion: MeetingSpeakerSuggestion) {
@@ -2209,6 +2296,99 @@ private struct WorkspaceSpeakerRenameSheet: View {
         typedName = ""
         selectedCalendarIdentityID = suggestion.calendar?.id
         profileID = nil
+    }
+
+    private func chooseRemembered(_ person: SpeakerVoiceProfile) {
+        name = person.name
+        typedName = ""
+        selectedCalendarIdentityID = nil
+        profileID = draft.canConfirmIdentity ? person.id : nil
+    }
+
+    private func chooseVoiceMatch(_ match: SpeakerNameMatch) {
+        name = match.name
+        typedName = ""
+        selectedCalendarIdentityID = nil
+        profileID = draft.canConfirmIdentity ? match.profileID : nil
+    }
+
+    private func voiceSuggestionRow(_ match: SpeakerNameMatch) -> some View {
+        let percent = MeetingSpeakerNamingDraft.similarityPercent(match)
+        let selected = selectedCalendarIdentityID == nil
+            && (profileID == match.profileID
+                || MeetingSpeakerSuggestion.nameKey(match.name) == MeetingSpeakerSuggestion.nameKey(name))
+        return VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Button {
+                    chooseVoiceMatch(match)
+                } label: {
+                    HStack(spacing: 6) {
+                        Label(match.name, systemImage: selected ? "checkmark.circle.fill" : "waveform")
+                            .font(AppFont.scaled(.body))
+                        Text("\(percent)%")
+                            .font(AppFont.scaled(.callout).weight(.semibold))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Brand.tealFill.opacity(0.16), in: Capsule())
+                            .foregroundStyle(LBTokens.Palette.accentText)
+                    }
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(selected ? LBTokens.Palette.accentText : .primary)
+                Spacer(minLength: 8)
+                if let time = match.evidence.first?.start {
+                    Button("Play") { onPlayEvidence(time) }
+                }
+                Button("Dismiss") { onAction(.dismiss, match.name, nil) }
+            }
+            Text(match.explanation)
+                .font(AppFont.scaled(.caption))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .lbGroupedSurface()
+        .accessibilityIdentifier("speaker.rename.voiceMatch.\(match.id)")
+    }
+
+    private func rememberedPersonRow(_ person: SpeakerVoiceProfile, isReturnTarget: Bool) -> some View {
+        let selected = isRememberedChosen(person)
+        return Button {
+            chooseRemembered(person)
+        } label: {
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(alignment: .firstTextBaseline) {
+                    Label(person.name, systemImage: selected ? "checkmark.circle.fill" : "person.crop.circle")
+                        .font(AppFont.scaled(.body))
+                    Spacer(minLength: 8)
+                    if isReturnTarget {
+                        Image(systemName: "return")
+                            .font(AppFont.scaled(.callout))
+                            .foregroundStyle(.secondary)
+                            .accessibilityHidden(true)
+                    }
+                }
+                HStack(spacing: 6) {
+                    Text("Remembered person")
+                        .font(AppFont.scaled(.callout))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(.quaternary, in: Capsule())
+                    Text("\(person.contributions.count) recording(s)")
+                        .font(AppFont.scaled(.callout))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(12)
+            .lbGroupedSurface()
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(selected ? LBTokens.Palette.accentText : .primary)
+        .accessibilityIdentifier("speaker.rename.remembered.\(person.id.uuidString)")
     }
 
     private func suggestionRow(

@@ -309,6 +309,7 @@ pub struct NamingVoice {
     pub speech_seconds: f64,
     pub action_count: usize,
     pub recognized_name: Option<String>,
+    pub voice_suggestions: Vec<lokalbot_core::voice::NameMatch>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -325,6 +326,7 @@ pub fn naming_lists(
     speech: &HashMap<String, f64>,
     recognized: &HashMap<String, String>,
     recognized_before: &HashSet<String>,
+    voice_suggestions: &std::collections::BTreeMap<String, Vec<lokalbot_core::voice::NameMatch>>,
 ) -> (Vec<NamingVoice>, Vec<NamingKnown>) {
     let by_key: HashMap<&str, &Speaker> = speakers.iter().map(|s| (s.key.as_str(), s)).collect();
     let voices = review
@@ -339,6 +341,7 @@ pub fn naming_lists(
                 speech_seconds: speech.get(&item.key).copied().unwrap_or(0.),
                 action_count: item.action_count,
                 recognized_name: recognized.get(&item.key).cloned(),
+                voice_suggestions: voice_suggestions.get(&item.key).cloned().unwrap_or_default(),
             })
         })
         .collect();
@@ -360,6 +363,7 @@ pub struct NamingChoice {
     pub speaker: String,
     pub name: String,
     pub calendar_identity_id: Option<String>,
+    pub profile_id: Option<uuid::Uuid>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -367,15 +371,21 @@ pub struct Pick {
     pub id: String,
     pub name: String,
     pub calendar_identity_id: Option<String>,
+    pub profile_id: Option<uuid::Uuid>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct NamingDraft {
     picks: HashMap<String, Pick>,
     typing: HashSet<String>,
+    pub typed_profile_ids: HashMap<String, uuid::Uuid>,
 }
 
 impl NamingDraft {
+    pub fn similarity_percent(found: &lokalbot_core::voice::NameMatch) -> u32 {
+        (found.support_fraction.clamp(0.0, 1.0) * 100.0).round() as u32
+    }
+
     pub fn new(
         voices: &[NamingVoice],
         suggestions: &[lokalbot_core::calendar::SpeakerSuggestion],
@@ -409,6 +419,7 @@ impl NamingDraft {
 
     pub fn toggle(&mut self, pick: Pick, speaker: &str) {
         self.typing.remove(speaker);
+        self.typed_profile_ids.remove(speaker);
         if self.picks.get(speaker).is_some_and(|p| p.id == pick.id) {
             self.picks.remove(speaker);
             return;
@@ -419,7 +430,9 @@ impl NamingDraft {
     }
 
     pub fn type_name(&mut self, speaker: &str) {
-        if !self.typing.remove(speaker) {
+        if self.typing.remove(speaker) {
+            self.typed_profile_ids.remove(speaker);
+        } else {
             self.typing.insert(speaker.to_string());
             self.picks.remove(speaker);
         }
@@ -439,6 +452,7 @@ impl NamingDraft {
                         speaker: speaker.to_string(),
                         name,
                         calendar_identity_id: None,
+                        profile_id: self.typed_profile_ids.get(speaker).copied(),
                     });
                 }
                 let pick = self.picks.get(speaker)?;
@@ -446,6 +460,7 @@ impl NamingDraft {
                     speaker: speaker.to_string(),
                     name: pick.name.clone(),
                     calendar_identity_id: pick.calendar_identity_id.clone(),
+                    profile_id: pick.profile_id,
                 })
             })
             .collect()
@@ -467,12 +482,14 @@ pub fn recognized_pick(
             id: found.id.clone(),
             name: found.name.clone().unwrap_or_else(|| name.to_string()),
             calendar_identity_id: found.calendar.as_ref().map(|guest| guest.id.clone()),
+            profile_id: None,
         };
     }
     Pick {
         id: format!("recognized:{speaker}"),
         name: name.to_string(),
         calendar_identity_id: None,
+        profile_id: None,
     }
 }
 
@@ -761,6 +778,7 @@ mod tests {
             speech_seconds: 60.,
             action_count: 0,
             recognized_name: recognized.map(str::to_string),
+            voice_suggestions: Vec::new(),
         }
     }
 
@@ -769,6 +787,7 @@ mod tests {
             id: id.into(),
             name: name.into(),
             calendar_identity_id: None,
+            profile_id: None,
         }
     }
 
@@ -813,6 +832,7 @@ mod tests {
                 speaker: "them".into(),
                 name: "Marko".into(),
                 calendar_identity_id: None,
+                profile_id: None,
             }]
         );
     }
@@ -863,7 +883,14 @@ mod tests {
         let speech = HashMap::from([("them 2".to_string(), 125.)]);
         let recognized = HashMap::from([("them".to_string(), "Marko".to_string())]);
         let before = HashSet::from(["them 3".to_string()]);
-        let (voices, known) = naming_lists(&speakers, &review, &speech, &recognized, &before);
+        let (voices, known) = naming_lists(
+            &speakers,
+            &review,
+            &speech,
+            &recognized,
+            &before,
+            &std::collections::BTreeMap::new(),
+        );
         assert_eq!(
             voices.iter().map(|v| v.key.as_str()).collect::<Vec<_>>(),
             ["them 2", "them"]
@@ -872,5 +899,57 @@ mod tests {
         assert_eq!(voices[1].recognized_name.as_deref(), Some("Marko"));
         assert_eq!(known.len(), 1);
         assert!(known[0].was_recognized);
+    }
+
+    #[test]
+    fn voice_suggestions_and_profile_ids_propagate_to_choices() {
+        let profile_id = uuid::Uuid::new_v4();
+        let speakers = vec![speaker("them", "Other speaker", false, true)];
+        let review = vec![super::super::model::ReviewSpeaker {
+            key: "them".into(),
+            name: "Other speaker".into(),
+            is_user: false,
+            is_named: false,
+            sample: None,
+            action_count: 0,
+        }];
+        let suggestions = std::collections::BTreeMap::from([(
+            "them".to_string(),
+            vec![lokalbot_core::voice::NameMatch {
+                name: "Ada".into(),
+                participant_reference: "p1".into(),
+                tier: lokalbot_core::voice::MatchTier::Suggested,
+                source: lokalbot_core::voice::MatchSource::Profile,
+                support_seconds: 12.0,
+                independent_turns: 2,
+                support_fraction: 0.72,
+                contradiction_seconds: 0.0,
+                evidence: Vec::new(),
+                profile_id: Some(profile_id),
+                profile_revision: Some(1),
+                policy_version: "speaker-identity-1-experimental".into(),
+            }],
+        )]);
+        let (voices, _) = naming_lists(
+            &speakers,
+            &review,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashSet::new(),
+            &suggestions,
+        );
+        assert_eq!(voices[0].voice_suggestions.len(), 1);
+        assert_eq!(
+            NamingDraft::similarity_percent(&suggestions["them"][0]),
+            72
+        );
+        let mut draft = NamingDraft::new(&voices, &[]);
+        let mut pick = pick(&format!("profile:{profile_id}"), "Ada");
+        pick.profile_id = Some(profile_id);
+        draft.toggle(pick, "them");
+        let choices = draft.choices(["them"], |_| String::new());
+        assert_eq!(choices.len(), 1);
+        assert_eq!(choices[0].profile_id, Some(profile_id));
+        assert_eq!(choices[0].name, "Ada");
     }
 }
