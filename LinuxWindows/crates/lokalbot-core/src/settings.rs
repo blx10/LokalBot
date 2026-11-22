@@ -123,6 +123,7 @@ pub struct Settings {
     pub meeting_notes_use_calendar_context: bool,
     pub calendar_evolution_enabled: bool,
     pub calendar_outlook_enabled: bool,
+    pub ad_directory_enabled: bool,
     pub calendar_my_email_addresses: String,
 
     pub selection_actions_enabled: bool,
@@ -329,6 +330,7 @@ impl Default for Settings {
             meeting_notes_use_calendar_context: true,
             calendar_evolution_enabled: true,
             calendar_outlook_enabled: false,
+            ad_directory_enabled: false,
             calendar_my_email_addresses: String::new(),
             selection_actions_enabled: false,
             selection_actions_shortcut: "Ctrl+Alt+Space".into(),

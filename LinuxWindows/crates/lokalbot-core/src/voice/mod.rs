@@ -28,10 +28,10 @@ pub use matcher::{
 pub use resolver::{apply as apply_candidates, remap};
 pub use service::{
     Choice, ChooseError, ProcessRequest, Revisit, SavedMeetingAccess, VoiceMemory, audio_revision,
-    live_suggestions, recognized_speakers, recording_revision, same_person, summary_needs_refresh,
-    transcript_signature,
+    live_suggestions, recognized_speakers, recording_revision, same_person, same_person_with_ad,
+    summary_needs_refresh, transcript_signature,
 };
-pub use store::{Failure, Store};
+pub use store::{AdLink, Failure, Store};
 pub use timing::{AudioClockSpan, RecordingAudioTiming, TrackClock, reference_clock};
 
 pub const VOICE_MODEL: &str = "sherpa-onnx/nemo-titanet-small/embedding192/16k-mono-v1";
@@ -431,6 +431,12 @@ pub struct VoiceProfile {
     pub revision: u64,
     pub contributions: Vec<Contribution>,
     pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ad_object_guid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ad_distinguished_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ad_user_principal_name: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

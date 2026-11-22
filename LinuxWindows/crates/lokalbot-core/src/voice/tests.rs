@@ -421,6 +421,9 @@ fn profiles_of_another_voice_model_are_never_compared_or_added_to() {
             meeting_started_at: None,
         }],
         model: mac_sample.model.clone(),
+        ad_object_guid: None,
+        ad_distinguished_name: None,
+        ad_user_principal_name: None,
     };
     let ours = call_samples("them 1", 3);
     assert!(matches(&ours, std::slice::from_ref(&mac)).is_empty());
@@ -1097,4 +1100,95 @@ fn merge_profiles_combines_contributions_and_rejects_mismatched_local_user() {
         memory.merge_profiles(other_profile.id, user_profile.id),
         Err(Failure::Stale)
     ));
+}
+
+#[test]
+fn ad_metadata_persists_matches_by_guid_and_confirm_user_uses_os_name() {
+    let (_dir, library) = library();
+    let memory = memory(&library);
+    let first = meeting(&library);
+    let saved = process(
+        &memory,
+        &first,
+        &call_transcript("them 1"),
+        call_samples("them 1", 3),
+    );
+    let mut choice = Choice::new("them 1", Some("Ayse Yilmaz".into()), DecisionAction::Assign);
+    choice.ad_object_guid = Some("11223344-5566-7788-99aa-bbccddeeff00".into());
+    choice.ad_distinguished_name = Some("CN=Ayse Yilmaz,OU=People,DC=corp,DC=local".into());
+    choice.ad_user_principal_name = Some("ayse@corp.local".into());
+    memory.choose(&choice, &first, &saved).unwrap();
+
+    let profiles = memory.profiles().unwrap();
+    assert_eq!(profiles.len(), 1);
+    assert_eq!(
+        profiles[0].ad_object_guid.as_deref(),
+        Some("11223344-5566-7788-99aa-bbccddeeff00")
+    );
+    assert_eq!(
+        profiles[0].ad_user_principal_name.as_deref(),
+        Some("ayse@corp.local")
+    );
+
+    let other_samples = call_samples("them 1", 40);
+    assert_eq!(
+        same_person_with_ad(
+            "Ayse New Surname",
+            &other_samples,
+            &profiles,
+            Some("11223344-5566-7788-99aa-bbccddeeff00"),
+        ),
+        Some(profiles[0].id)
+    );
+
+    let local = meeting(&library);
+    let local_transcript = Transcript {
+        segments: (0..4)
+            .map(|i| {
+                let start = i as f64 * 7.0;
+                segment(start, start + 6.0, "me", AttributionSource::Microphone)
+            })
+            .collect(),
+        engine: "test".into(),
+        ..Default::default()
+    };
+    let mic_turns: Vec<AudioTurn> = local_transcript
+        .segments
+        .iter()
+        .map(|s| AudioTurn {
+            speaker: s.speaker.clone(),
+            range: TurnAnchor {
+                start: s.start,
+                end: s.end,
+            },
+            source: Some(AttributionSource::Microphone),
+        })
+        .collect();
+    let mic_samples: Vec<VoiceSample> = (0..4)
+        .map(|i| sample("me", i as f64 * 7.0, 21, i, AttributionSource::Microphone))
+        .collect();
+    let local_saved = memory
+        .process(ProcessRequest {
+            transcript: &local_transcript,
+            meeting: &local,
+            turns: &mic_turns,
+            evidence: evidence(mic_samples),
+            mic: None,
+            system: None,
+            previous: None,
+            name_automatically: true,
+        })
+        .unwrap();
+    let confirm = Choice::new("me", None, DecisionAction::ConfirmUser);
+    let confirmed = memory.choose(&confirm, &local, &local_saved).unwrap();
+    let expected = crate::people::user_full_name(None).unwrap_or_else(|| "Me".to_string());
+    let local_state = memory.state(&local).unwrap();
+    assert_eq!(
+        local_state.assignment("me").unwrap().name.as_deref(),
+        Some(expected.as_str())
+    );
+    assert_eq!(local_state.assignment("me").unwrap().is_local_user, Some(true));
+    if !expected.eq_ignore_ascii_case("me") {
+        assert_eq!(confirmed.speaker_aliases["me"], expected);
+    }
 }

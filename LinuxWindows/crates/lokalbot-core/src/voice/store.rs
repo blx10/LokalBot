@@ -44,6 +44,13 @@ pub enum Failure {
     Encoding(#[from] serde_json::Error),
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AdLink {
+    pub object_guid: Option<String>,
+    pub distinguished_name: Option<String>,
+    pub user_principal_name: Option<String>,
+}
+
 pub struct Store {
     root: PathBuf,
     key: [u8; 32],
@@ -306,6 +313,7 @@ impl Store {
         decision: &Decision,
         samples: &[VoiceSample],
         profile_id: Option<Uuid>,
+        ad: Option<&AdLink>,
         expected_database_revision: u64,
     ) -> Result<Uuid, Failure> {
         let deleted = self.lock.lock();
@@ -358,6 +366,7 @@ impl Store {
             &name,
             assignment.is_local_user,
             profile_id,
+            ad,
             &mut database,
         )
     }
@@ -413,7 +422,7 @@ impl Store {
         let confirmed = decision.map_or_else(Utc::now, |d| d.confirmed_at);
         let local_user = assignment.is_local_user;
         let contribution = contribution(meeting, assignment, decision_id, confirmed, samples);
-        self.add(contribution, &name, local_user, profile_id, &mut database)
+        self.add(contribution, &name, local_user, profile_id, None, &mut database)
     }
 
     fn add(
@@ -422,6 +431,7 @@ impl Store {
         name: &str,
         is_local_user: Option<bool>,
         profile_id: Option<Uuid>,
+        ad: Option<&AdLink>,
         database: &mut ProfileDatabase,
     ) -> Result<Uuid, Failure> {
         let target = profile_id.unwrap_or_else(Uuid::new_v4);
@@ -439,6 +449,17 @@ impl Store {
             }
             if is_local_user.is_some() {
                 profile.is_local_user = is_local_user;
+            }
+            if let Some(ad) = ad {
+                if ad.object_guid.is_some() {
+                    profile.ad_object_guid = ad.object_guid.clone();
+                }
+                if ad.distinguished_name.is_some() {
+                    profile.ad_distinguished_name = ad.distinguished_name.clone();
+                }
+                if ad.user_principal_name.is_some() {
+                    profile.ad_user_principal_name = ad.user_principal_name.clone();
+                }
             }
             profile.contributions.retain(|c| {
                 c.meeting_id != contribution.meeting_id || c.speaker_id != contribution.speaker_id
@@ -467,6 +488,9 @@ impl Store {
                 revision: 1,
                 contributions: vec![contribution],
                 model: VOICE_MODEL.to_string(),
+                ad_object_guid: ad.and_then(|a| a.object_guid.clone()),
+                ad_distinguished_name: ad.and_then(|a| a.distinguished_name.clone()),
+                ad_user_principal_name: ad.and_then(|a| a.user_principal_name.clone()),
             });
         }
         database.revision += 1;
@@ -577,6 +601,15 @@ impl Store {
         let target = &mut database.profiles[target_ix];
         if target.is_local_user.is_none() {
             target.is_local_user = source.is_local_user;
+        }
+        if target.ad_object_guid.is_none() {
+            target.ad_object_guid = source.ad_object_guid;
+        }
+        if target.ad_distinguished_name.is_none() {
+            target.ad_distinguished_name = source.ad_distinguished_name;
+        }
+        if target.ad_user_principal_name.is_none() {
+            target.ad_user_principal_name = source.ad_user_principal_name;
         }
         for item in source.contributions {
             if !target.contributions.iter().any(|existing| {

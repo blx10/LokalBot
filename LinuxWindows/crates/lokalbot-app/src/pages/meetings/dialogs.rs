@@ -469,6 +469,10 @@ pub(crate) struct NameSpeakerSheet {
     pub(super) live_voice_suggestions: Vec<lokalbot_core::voice::NameMatch>,
     pub(super) notice: Option<String>,
     pub(super) profile_id: Option<uuid::Uuid>,
+    ad_results: Vec<lokalbot_platform::directory::AdPerson>,
+    ad_query: String,
+    ad_selected: Option<lokalbot_platform::directory::AdPerson>,
+    ad_task: Option<gpui_kit::Task<()>>,
     pub(super) busy: bool,
     pub(super) page: gpui_kit::WeakEntity<super::MeetingsPage>,
 }
@@ -509,7 +513,9 @@ impl NameSpeakerSheet {
                 window,
                 |this: &mut Self, input, event: &InputEvent, window, cx| match event {
                     InputEvent::Change => {
-                        this.suggestions.query = input.read(cx).value().to_string();
+                        let typed = input.read(cx).value().to_string();
+                        this.suggestions.query = typed.clone();
+                        this.refresh_ad(&typed, window, cx);
                         cx.notify();
                     }
                     InputEvent::PressEnter { .. } => {
@@ -537,6 +543,10 @@ impl NameSpeakerSheet {
                 live_voice_suggestions,
                 notice,
                 profile_id: None,
+                ad_results: Vec::new(),
+                ad_query: String::new(),
+                ad_selected: None,
+                ad_task: None,
                 busy: false,
                 page,
             }
@@ -573,6 +583,16 @@ impl NameSpeakerSheet {
             self.matching_profile_name(*profile)
                 .is_some_and(|name| Some(&name) == choice.name.as_ref())
         });
+        if let Some(ad) = &self.ad_selected
+            && choice.name.as_deref().is_some_and(|name| {
+                lokalbot_core::voice::name_key(name)
+                    == lokalbot_core::voice::name_key(&ad.display_name)
+            })
+        {
+            choice.ad_object_guid = ad.object_guid.clone();
+            choice.ad_distinguished_name = ad.distinguished_name.clone();
+            choice.ad_user_principal_name = ad.user_principal_name.clone();
+        }
         choice.expected_revision = self.identity.as_ref().map(|state| state.revision);
         self.perform(choice, window, cx);
     }
@@ -673,6 +693,7 @@ impl NameSpeakerSheet {
         cx: &mut Context<Self>,
     ) {
         self.profile_id = profile_id;
+        self.ad_selected = None;
         self.suggestions.selected = None;
         self.suggestions.query.clear();
         self.name
@@ -717,6 +738,7 @@ impl NameSpeakerSheet {
         self.suggestions.selected = choice.calendar.as_ref().map(|guest| guest.id.clone());
         self.suggestions.query.clear();
         self.profile_id = None;
+        self.ad_selected = None;
         self.name
             .update(cx, |input, cx| input.set_value(name, window, cx));
         cx.notify();
@@ -880,6 +902,87 @@ impl NameSpeakerSheet {
                 .into_any_element(),
         )
     }
+
+    fn refresh_ad(&mut self, raw: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let query = raw.trim().to_string();
+        if self.ad_selected.as_ref().is_some_and(|ad| {
+            lokalbot_core::voice::name_key(&ad.display_name)
+                != lokalbot_core::voice::name_key(&query)
+        }) {
+            self.ad_selected = None;
+        }
+        if !self.data.read(cx).settings.ad_directory_enabled || query.chars().count() < 3 {
+            self.ad_query.clear();
+            self.ad_results.clear();
+            self.ad_task = None;
+            return;
+        }
+        if self.ad_query == query {
+            return;
+        }
+        self.ad_query = query.clone();
+        let expected = query.clone();
+        self.ad_task = Some(cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(180))
+                .await;
+            let found = cx
+                .background_spawn(async move {
+                    lokalbot_platform::directory::search_ad_people(&query, 8)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.ad_query == expected {
+                    this.ad_results = found;
+                    cx.notify();
+                }
+            });
+        }));
+    }
+
+    fn render_ad_results(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.ad_results.is_empty() || self.ad_query.chars().count() < 3 {
+            return None;
+        }
+        let lb = cx.lb().clone();
+        let mut row = h_flex().flex_wrap().gap(px(6.));
+        for (ix, person) in self.ad_results.iter().enumerate() {
+            let label = match &person.user_principal_name {
+                Some(upn) => format!("{} ({upn})", person.display_name),
+                None => person.display_name.clone(),
+            };
+            let selected = self.ad_selected.as_ref() == Some(person);
+            let chosen = person.clone();
+            let mut button = Button::new(("speaker-ad-match", ix))
+                .small()
+                .label(label)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.fill_name(chosen.display_name.clone(), None, window, cx);
+                    this.ad_selected = Some(chosen.clone());
+                    this.ad_query = chosen.display_name.clone();
+                    cx.notify();
+                }));
+            button = if selected {
+                button.primary()
+            } else {
+                button.outline()
+            };
+            row = row.child(button);
+        }
+        Some(
+            v_flex()
+                .gap(px(6.))
+                .child(
+                    div()
+                        .text_size(ty::SECONDARY)
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(lb.text)
+                        .child(lokalbot_i18n::tr("Active Directory")),
+                )
+                .child(row)
+                .into_any_element(),
+        )
+    }
 }
 
 impl Render for NameSpeakerSheet {
@@ -921,6 +1024,7 @@ impl Render for NameSpeakerSheet {
             )
             .children(self.render_voice_matches(&voice_matches, cx))
             .children(self.render_remembered_profiles(&remembered, cx))
+            .children(self.render_ad_results(cx))
             .children(self.suggestions.render(&typed, cx))
             .child(self.render_identity_review(cx))
             .child(

@@ -6,6 +6,7 @@ pub mod autostart;
 pub mod calendar;
 pub mod chord;
 pub mod control_socket;
+pub mod directory;
 pub mod disk;
 pub mod focus;
 pub mod insert;

@@ -1491,6 +1491,13 @@ pub const ENTRIES: &[Entry] = &[
         value: |s| on_off(s.calendar_outlook_enabled),
     },
     Entry {
+        id: "settings.adDirectoryEnabled",
+        title: "Look up speaker names in Active Directory",
+        category: Meetings,
+        aliases: "active directory ldap ad domain speaker lookup windows",
+        value: |s| on_off(s.ad_directory_enabled),
+    },
+    Entry {
         id: "settings.cotypingForgetLearned",
         title: "Forget learned completions",
         category: Writing,

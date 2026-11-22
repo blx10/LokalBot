@@ -1639,6 +1639,15 @@ pub(super) fn table() -> Vec<SettingSpec> {
             "Windows: read the primary calendar of Classic Outlook while Outlook is open.",
         ),
         e(
+            "adDirectoryEnabled",
+            Recording,
+            "Look up speaker names in Active Directory",
+            Bool,
+            Consent,
+            "active directory ldap ad domain speaker lookup windows",
+            "Windows: search your local Active Directory by displayName when naming speakers.",
+        ),
+        e(
             "calendarMyEmailAddresses",
             Recording,
             "My email addresses",

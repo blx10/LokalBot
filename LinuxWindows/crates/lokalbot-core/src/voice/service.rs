@@ -174,6 +174,26 @@ pub fn recognized_speakers(
 }
 
 pub fn same_person(name: &str, samples: &[VoiceSample], profiles: &[VoiceProfile]) -> Option<Uuid> {
+    same_person_with_ad(name, samples, profiles, None)
+}
+
+pub fn same_person_with_ad(
+    name: &str,
+    samples: &[VoiceSample],
+    profiles: &[VoiceProfile],
+    ad_object_guid: Option<&str>,
+) -> Option<Uuid> {
+    if let Some(guid) = ad_object_guid.map(str::trim).filter(|g| !g.is_empty())
+        && let Some(found) = profiles.iter().find(|profile| {
+            profile.model == super::VOICE_MODEL
+                && profile
+                    .ad_object_guid
+                    .as_deref()
+                    .is_some_and(|existing| existing.eq_ignore_ascii_case(guid))
+        })
+    {
+        return Some(found.id);
+    }
     let key = name_key(name);
     let named: Vec<VoiceProfile> = profiles
         .iter()
@@ -276,6 +296,9 @@ pub struct Choice {
     pub action: DecisionAction,
     pub profile_id: Option<Uuid>,
     pub expected_revision: Option<u64>,
+    pub ad_object_guid: Option<String>,
+    pub ad_distinguished_name: Option<String>,
+    pub ad_user_principal_name: Option<String>,
 }
 
 impl Choice {
@@ -288,6 +311,9 @@ impl Choice {
             action,
             profile_id: None,
             expected_revision: None,
+            ad_object_guid: None,
+            ad_distinguished_name: None,
+            ad_user_principal_name: None,
         }
     }
 }
@@ -779,7 +805,7 @@ impl VoiceMemory {
                     assignment.is_local_user = Some(is_user);
                     if assignment.name.is_none() {
                         assignment.name = Some(if is_user {
-                            "Me".to_string()
+                            crate::people::user_full_name(None).unwrap_or_else(|| "Me".to_string())
                         } else {
                             transcript.speaker_name(&label)
                         });
@@ -873,16 +899,30 @@ impl VoiceMemory {
         {
             let samples = eligible(&committed.voice_samples, &committed.timeline, &label);
             if can_enroll(&samples) {
+                let ad = (choice.ad_object_guid.is_some()
+                    || choice.ad_distinguished_name.is_some()
+                    || choice.ad_user_principal_name.is_some())
+                .then(|| super::store::AdLink {
+                    object_guid: choice.ad_object_guid.clone(),
+                    distinguished_name: choice.ad_distinguished_name.clone(),
+                    user_principal_name: choice.ad_user_principal_name.clone(),
+                });
                 let enrolled = store.profiles().and_then(|database| {
-                    let target = choice
-                        .profile_id
-                        .or_else(|| same_person(name, &samples, &database.profiles));
+                    let target = choice.profile_id.or_else(|| {
+                        same_person_with_ad(
+                            name,
+                            &samples,
+                            &database.profiles,
+                            choice.ad_object_guid.as_deref(),
+                        )
+                    });
                     store.enroll(
                         meeting,
                         &assignment,
                         &decision,
                         &samples,
                         target,
+                        ad.as_ref(),
                         database.revision,
                     )
                 });

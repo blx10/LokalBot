@@ -493,7 +493,7 @@ impl SettingsPage {
                 ),
             );
 
-        let speakers = Section::new(lokalbot_i18n::tr("Speaker names"))
+        let mut speakers = Section::new(lokalbot_i18n::tr("Speaker names"))
             .row(
                 "settings.multiSpeakerDiarization",
                 self.toggle(
@@ -547,6 +547,21 @@ impl SettingsPage {
                     cx,
                 ),
             );
+        if cfg!(windows) {
+            speakers = speakers.row(
+                "settings.adDirectoryEnabled",
+                self.toggle(
+                    "settings.adDirectoryEnabled",
+                    lokalbot_i18n::tr("Look up speaker names in Active Directory"),
+                    Some(lokalbot_i18n::tr(
+                        "Searches your local Active Directory by display name when naming speakers (after 3 or more typed characters).",
+                    )),
+                    settings.ad_directory_enabled,
+                    |s, v| s.ad_directory_enabled = v,
+                    cx,
+                ),
+            );
+        }
 
         let echo = Section::new(lokalbot_i18n::tr("Speakers and echo")).row(
             "settings.echoCancellation",

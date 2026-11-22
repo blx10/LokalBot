@@ -35,6 +35,10 @@ pub(crate) struct NamingSheet {
     assigned: HashSet<String>,
     draft: NamingDraft,
     typed: HashMap<String, Entity<InputState>>,
+    ad_selected: HashMap<String, lokalbot_platform::directory::AdPerson>,
+    ad_queries: HashMap<String, String>,
+    ad_results: HashMap<String, Vec<lokalbot_platform::directory::AdPerson>>,
+    ad_tasks: HashMap<String, gpui_kit::Task<()>>,
     can_play: bool,
     busy: bool,
     notice: Option<String>,
@@ -84,6 +88,10 @@ impl NamingSheet {
             assigned,
             draft,
             typed: HashMap::new(),
+            ad_selected: HashMap::new(),
+            ad_queries: HashMap::new(),
+            ad_results: HashMap::new(),
+            ad_tasks: HashMap::new(),
             can_play,
             busy: false,
             notice: doc.speaker_notice.clone(),
@@ -122,17 +130,21 @@ impl NamingSheet {
                             cx,
                         ))
                     });
-                    cx.subscribe_in(&input, window, |this, input, event: &InputEvent, window, cx| {
+                    let speaker_key = speaker.to_string();
+                    cx.subscribe_in(&input, window, move |this, input, event: &InputEvent, window, cx| {
                         match event {
                             InputEvent::Change => {
                                 let typed = input.read(cx).value().to_string();
                                 let key_match = SpeakerSuggestion::name_key(&typed);
-                                this.draft.typed_profile_ids.retain(|_, pid| {
-                                    this.remembered_people.iter().any(|p| {
-                                        p.id == *pid
-                                            && SpeakerSuggestion::name_key(&p.name) == key_match
-                                    })
+                                this.draft.typed_profile_ids.retain(|s, pid| {
+                                    s != &speaker_key
+                                        || this.remembered_people.iter().any(|p| {
+                                            p.id == *pid
+                                                && SpeakerSuggestion::name_key(&p.name)
+                                                    == key_match
+                                        })
                                 });
+                                this.refresh_ad(&speaker_key, &typed, window, cx);
                                 cx.notify();
                             }
                             InputEvent::PressEnter { .. } => this.save(window, cx),
@@ -190,16 +202,27 @@ impl NamingSheet {
         let meeting = self.meeting.clone();
         let transcript = self.transcript.clone();
         let data = self.data.clone();
+        let ad_selected = self.ad_selected.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
                     let mut current = transcript;
                     for choice in choices {
+                        let speaker = choice.speaker.clone();
+                        let choice_name = choice.name;
                         let mut decision =
-                            Choice::new(&choice.speaker, Some(choice.name), DecisionAction::Assign);
+                            Choice::new(&speaker, Some(choice_name.clone()), DecisionAction::Assign);
                         decision.calendar_identity_id = choice.calendar_identity_id;
-                        if current.can_confirm_speaker(&choice.speaker) {
+                        if current.can_confirm_speaker(&speaker) {
                             decision.profile_id = choice.profile_id;
+                        }
+                        if let Some(ad) = ad_selected.get(&speaker)
+                            && SpeakerSuggestion::name_key(&ad.display_name)
+                                == SpeakerSuggestion::name_key(&choice_name)
+                        {
+                            decision.ad_object_guid = ad.object_guid.clone();
+                            decision.ad_distinguished_name = ad.distinguished_name.clone();
+                            decision.ad_user_principal_name = ad.user_principal_name.clone();
                         }
                         current = lokalbot_engine::voice::save_choice(
                             &library, &decision, &meeting, &current,
@@ -492,6 +515,11 @@ impl NamingSheet {
                         |this, input| {
                             let query = input.read(cx).value().to_string();
                             let matches = self.matching_profiles(&query);
+                            let ad_matches = self
+                                .ad_results
+                                .get(&voice.key)
+                                .cloned()
+                                .unwrap_or_default();
                             let speaker_key = voice.key.clone();
                             this.child(
                                 v_flex()
@@ -517,6 +545,7 @@ impl NamingSheet {
                                                         cx,
                                                     )
                                                     .on_click(cx.listener(move |this, _, window, cx| {
+                                                        this.ad_selected.remove(&speaker_for_click);
                                                         this.draft.typed_profile_ids.insert(
                                                             speaker_for_click.clone(),
                                                             person_id,
@@ -534,12 +563,116 @@ impl NamingSheet {
                                                 }),
                                             ),
                                         )
+                                    })
+                                    .when(!ad_matches.is_empty(), |col| {
+                                        let speaker_for_ad = speaker_key.clone();
+                                        col.child(
+                                            v_flex()
+                                                .gap(px(4.))
+                                                .child(
+                                                    div()
+                                                        .text_size(ty::CAPTION)
+                                                        .text_color(lb.text_secondary)
+                                                        .child(lokalbot_i18n::tr("Active Directory")),
+                                                )
+                                                .child(
+                                                    h_flex().flex_wrap().gap(px(6.)).children(
+                                                        ad_matches.into_iter().enumerate().map(
+                                                            |(a_ix, person)| {
+                                                                let selected = self
+                                                                    .ad_selected
+                                                                    .get(&speaker_for_ad)
+                                                                    == Some(&person);
+                                                                let speaker_for_click =
+                                                                    speaker_for_ad.clone();
+                                                                let input_for_click = input.clone();
+                                                                let chosen = person.clone();
+                                                                let label = match &person.user_principal_name {
+                                                                    Some(upn) => format!("{} ({upn})", person.display_name),
+                                                                    None => person.display_name.clone(),
+                                                                };
+                                                                name_chip(
+                                                                    format!("naming-ad-{ix}-{a_ix}").into(),
+                                                                    label,
+                                                                    selected,
+                                                                    cx,
+                                                                )
+                                                                .on_click(cx.listener(move |this, _, window, cx| {
+                                                                    this.draft.typed_profile_ids.remove(&speaker_for_click);
+                                                                    this.ad_selected.insert(
+                                                                        speaker_for_click.clone(),
+                                                                        chosen.clone(),
+                                                                    );
+                                                                    this.ad_queries.insert(
+                                                                        speaker_for_click.clone(),
+                                                                        chosen.display_name.clone(),
+                                                                    );
+                                                                    input_for_click.update(cx, |state, cx| {
+                                                                        state.set_value(
+                                                                            chosen.display_name.clone(),
+                                                                            window,
+                                                                            cx,
+                                                                        );
+                                                                    });
+                                                                    cx.notify();
+                                                                }))
+                                                                .into_any_element()
+                                                            },
+                                                        ),
+                                                    ),
+                                                ),
+                                        )
                                     }),
                             )
                         },
                     ),
             )
             .into_any_element()
+    }
+
+    fn refresh_ad(
+        &mut self,
+        speaker: &str,
+        raw: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let query = raw.trim().to_string();
+        if self.ad_selected.get(speaker).is_some_and(|ad| {
+            SpeakerSuggestion::name_key(&ad.display_name) != SpeakerSuggestion::name_key(&query)
+        }) {
+            self.ad_selected.remove(speaker);
+        }
+        if !self.data.read(cx).settings.ad_directory_enabled || query.chars().count() < 3 {
+            self.ad_queries.remove(speaker);
+            self.ad_results.remove(speaker);
+            self.ad_tasks.remove(speaker);
+            return;
+        }
+        if self.ad_queries.get(speaker).is_some_and(|q| q == &query) {
+            return;
+        }
+        let speaker_key = speaker.to_string();
+        let expected_speaker = speaker_key.clone();
+        self.ad_queries.insert(speaker_key.clone(), query.clone());
+        let expected = query.clone();
+        let task = cx.spawn_in(window, async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(180))
+                .await;
+            let found = cx
+                .background_spawn(async move {
+                    lokalbot_platform::directory::search_ad_people(&query, 8)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.ad_queries.get(&expected_speaker) == Some(&expected) {
+                    this.ad_results.insert(expected_speaker, found);
+                    cx.notify();
+                }
+            });
+        });
+        self.ad_tasks.insert(speaker_key, task);
     }
 
     fn sorted_profiles(&self) -> Vec<lokalbot_core::voice::VoiceProfile> {
