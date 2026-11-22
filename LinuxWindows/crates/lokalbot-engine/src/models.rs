@@ -112,7 +112,7 @@ impl Models {
 
     pub fn think_requirements(&self) -> Vec<String> {
         let settings = self.shared.settings();
-        if settings.disable_local_llama_server {
+        if crate::post_correction::local_llama_server_disabled(&settings) {
             return Vec::new();
         }
         match settings.summarizer_backend {
@@ -300,11 +300,16 @@ impl Models {
     }
 
     pub fn prepare_for_settings(&self) {
+        let settings = self.shared.settings();
+        let local_disabled = crate::post_correction::local_llama_server_disabled(&settings);
         let mut ids = self.meeting_requirements(true);
-        if self.shared.settings().semantic_search_enabled {
+        if settings.semantic_search_enabled && !local_disabled {
             ids.extend(self.embedding_requirements());
         }
         ids.extend(self.screen_requirements());
+        if local_disabled {
+            ids.retain(|id| id != RUNTIME_ID);
+        }
         let mut seen = std::collections::HashSet::new();
         ids.retain(|id| seen.insert(id.clone()));
         let missing = self.missing(&ids);
@@ -359,6 +364,9 @@ impl Models {
     }
 
     pub fn finish_runtime_update(&self) {
+        if crate::post_correction::local_llama_server_disabled(&self.shared.settings()) {
+            return;
+        }
         if !self.shared.runtime.has_other_builds() {
             return;
         }

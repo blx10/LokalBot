@@ -530,6 +530,7 @@ fn convert_stage(stage: Stage) -> ProcessingStage {
         Stage::PreparingModel(name) => ProcessingStage::PreparingModel(name.into()),
         Stage::Transcribing => ProcessingStage::Transcribing,
         Stage::IdentifyingSpeakers => ProcessingStage::IdentifyingSpeakers,
+        Stage::PostCorrecting => ProcessingStage::PostCorrecting,
         Stage::Summarizing => ProcessingStage::Summarizing,
         Stage::Failed(message) => ProcessingStage::Failed(message.into()),
     }

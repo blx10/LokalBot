@@ -438,6 +438,7 @@ pub enum Stage {
     PreparingModel(String),
     Transcribing,
     IdentifyingSpeakers,
+    PostCorrecting,
     Summarizing,
     Failed(String),
 }

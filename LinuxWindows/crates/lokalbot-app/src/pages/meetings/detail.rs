@@ -2385,6 +2385,7 @@ pub(super) fn stage_label(stage: &ProcessingStage) -> String {
         ProcessingStage::PreparingModel(name) => lokalbot_i18n::format("Preparing {name}…", &[("name", format!("{}", name))]),
         ProcessingStage::Transcribing => lokalbot_i18n::tr("Transcribing…").into(),
         ProcessingStage::IdentifyingSpeakers => lokalbot_i18n::tr("Identifying speakers…").into(),
+        ProcessingStage::PostCorrecting => lokalbot_i18n::tr("Refining transcript…").into(),
         ProcessingStage::Summarizing => lokalbot_i18n::tr("Summarizing…").into(),
         ProcessingStage::Failed(reason) => lokalbot_i18n::format("Failed: {reason}", &[("reason", format!("{}", reason))]),
     }

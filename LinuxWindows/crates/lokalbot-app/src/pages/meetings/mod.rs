@@ -1216,6 +1216,7 @@ impl Page for MeetingsPage {
                         Stage::PreparingModel(_)
                             | Stage::Transcribing
                             | Stage::IdentifyingSpeakers
+                            | Stage::PostCorrecting
                             | Stage::Summarizing
                     )
                 )

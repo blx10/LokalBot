@@ -22,6 +22,7 @@ pub mod notes;
 pub mod ocr;
 pub mod personal_learning;
 pub mod plans;
+pub mod post_correction;
 mod process;
 pub mod project_status;
 pub mod prompts;

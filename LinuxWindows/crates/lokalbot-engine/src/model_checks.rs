@@ -97,7 +97,7 @@ fn connection_identity(settings: &Settings, backend: SummarizerBackend) -> Vec<S
     identity(
         ModelRole::Think,
         &config,
-        &crate::effective_openai_api_key(&config).unwrap_or_default(),
+        &crate::secrets::resolve_openai_api_key(&config).unwrap_or_default(),
     )
 }
 
@@ -223,7 +223,7 @@ impl ModelChecks {
 
 fn openai_key_for(settings: &Settings) -> String {
     if settings.summarizer_backend == SummarizerBackend::OpenAICompatible {
-        crate::effective_openai_api_key(settings).unwrap_or_default()
+        crate::secrets::resolve_openai_api_key(settings).unwrap_or_default()
     } else {
         String::new()
     }

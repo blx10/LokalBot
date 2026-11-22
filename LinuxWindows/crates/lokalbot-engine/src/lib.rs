@@ -24,6 +24,7 @@ mod live;
 mod model_checks;
 mod models;
 mod pipeline;
+pub mod post_correction;
 mod project_notes;
 mod recording;
 mod resources;
@@ -109,6 +110,7 @@ impl Shared {
         runtime: lokalbot_ai::runtime::RuntimeManager,
         emit: Box<dyn Fn(EngineEvent) + Send + Sync>,
     ) -> Arc<Self> {
+        runtime.set_local_server_disabled(post_correction::local_llama_server_disabled(&settings));
         Arc::new(Shared {
             library,
             settings: RwLock::new(settings),
@@ -203,7 +205,7 @@ impl Shared {
         let client = lokalbot_ai::think::ThinkClient::new(&self.runtime, settings)?;
         Ok(match settings.summarizer_backend {
             lokalbot_core::settings::SummarizerBackend::OpenAICompatible => {
-                client.with_api_key(effective_openai_api_key(settings))
+                client.with_api_key(secrets::resolve_openai_api_key(settings))
             }
             _ => client,
         })
@@ -578,6 +580,9 @@ fn dispatch(shared: Arc<Shared>, commands: Sender<Command>, receiver: Receiver<C
                 shared
                     .runtime
                     .set_backend_preference(&settings.llama_backend);
+                shared.runtime.set_local_server_disabled(
+                    post_correction::local_llama_server_disabled(&settings),
+                );
                 lokalbot_core::SpeakerAttribution::set_microphone_is_user(
                     settings.microphone_is_user,
                 );

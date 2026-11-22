@@ -27,6 +27,18 @@ pub fn openai_api_key() -> Option<String> {
         .filter(|k| !k.trim().is_empty())
 }
 
+pub fn resolve_openai_api_key(settings: &lokalbot_core::Settings) -> Option<String> {
+    resolve_openai_api_key_with(settings, openai_api_key)
+}
+
+pub(crate) fn resolve_openai_api_key_with(
+    settings: &lokalbot_core::Settings,
+    keyring_lookup: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    let config_key = crate::post_correction::think_api_key(settings);
+    lokalbot_ai::think::resolve_api_key(config_key.as_deref(), keyring_lookup())
+}
+
 const REMOTE_TRANSCRIPTION: &str = "remote-transcription-api-key";
 
 pub fn save_remote_transcription_api_key(key: &str) -> Result<()> {

@@ -583,6 +583,7 @@ impl Inner {
                 options.vocabulary_prompt.as_deref(),
             )?;
             let transcript = memory.applying_latest_decision(&transcript, meeting.id);
+            let transcript = self.post_correct_transcript(&meeting, &settings, transcript)?;
             library.save_new_transcript(&meeting, &transcript)?;
             library.mark_transcription_completed(meeting.id)?;
             library.reindex_meeting(&meeting)?;
@@ -686,6 +687,7 @@ impl Inner {
             let _ = std::fs::remove_file(folder.join(lokalbot_core::library::REFRESH_MARKER));
             library.reindex_meeting(&meeting)?;
             if settings.semantic_search_enabled
+                && !crate::post_correction::local_llama_server_disabled(&settings)
                 && self
                     .models
                     .missing(&self.models.embedding_requirements())
@@ -697,6 +699,26 @@ impl Inner {
             }
         }
         Ok(Outcome::Done)
+    }
+
+    fn post_correct_transcript(
+        &self,
+        meeting: &Meeting,
+        settings: &lokalbot_core::Settings,
+        transcript: lokalbot_core::Transcript,
+    ) -> Result<lokalbot_core::Transcript> {
+        let segments = crate::post_correction::segments_from_transcript(&transcript);
+        let (corrected, _) = crate::post_correction::correct_transcript(
+            meeting,
+            &self.shared.library,
+            settings,
+            transcript,
+            &segments,
+            &mut || {
+                self.stage(meeting, Stage::PostCorrecting, "Refining transcript", None);
+            },
+        )?;
+        Ok(corrected)
     }
 }
 
@@ -1403,5 +1425,122 @@ mod tests {
         assert_eq!(reconciled[0].primary, "gerçek cümle");
         assert_eq!(reconciled[0].tr_backup, "backup");
         assert_eq!(reconciled[0].fast_helper, "helper");
+    }
+
+    #[test]
+    fn post_correction_stage_updates_transcript_and_writes_audit_json() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+        use lokalbot_ai::post_correction::PostCorrectionConfig;
+        use lokalbot_core::model::transcript::{Segment, Transcript};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut first = String::new();
+                let _ = reader.read_line(&mut first);
+                let mut len = 0usize;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    let line = line.trim_end();
+                    if line.is_empty() {
+                        break;
+                    }
+                    if let Some((k, v)) = line.split_once(':')
+                        && k.eq_ignore_ascii_case("content-length")
+                    {
+                        len = v.trim().parse().unwrap_or(0);
+                    }
+                }
+                let mut buf = vec![0u8; len];
+                let _ = reader.read_exact(&mut buf);
+                let req_json: serde_json::Value =
+                    serde_json::from_slice(&buf).unwrap_or(serde_json::Value::Null);
+                let model = req_json["model"].as_str().unwrap_or("");
+                let content = match model {
+                    "gemma-4-31B-it" => {
+                        r#"{"candidates":[{"segment_id":1,"wrong_in_primary":"videolardan","suggested_fix":"üzerinden","supported_by":"zipformer-oayk","reason":"phonetic"}]}"#
+                    }
+                    "gpt-oss-120b" => r#"{"candidates":[]}"#,
+                    "Qwen3.8-27B" => {
+                        r#"{"segments":[{"segment_id":1,"text":"sistem üzerinden çalışır"}]}"#
+                    }
+                    _ => r#"{"candidates":[]}"#,
+                };
+                let body = serde_json::json!({
+                    "choices": [{
+                        "message": { "role": "assistant", "content": content },
+                        "finish_reason": "stop"
+                    }]
+                })
+                .to_string();
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(body.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+
+        let (_dir, library) = library();
+        let meeting = finished_without_audio(&library);
+        let mut settings = lokalbot_core::Settings::default();
+        let pc_cfg = PostCorrectionConfig {
+            enabled: true,
+            base_url: format!("http://127.0.0.1:{port}/v1"),
+            api_key: "sk-pipeline-secret".into(),
+            ..Default::default()
+        };
+        crate::post_correction::set_post_correction_config(&mut settings, Some(&pc_cfg));
+        crate::post_correction::set_save_audit_log(&mut settings, true);
+        crate::post_correction::set_local_llama_server_disabled(&mut settings, true);
+
+        let stages = Stages::default();
+        let seen = stages.clone();
+        let shared = Shared::for_tests(library.clone(), settings.clone(), move |event| {
+            if let EngineEvent::Processing { stage, .. } = event {
+                seen.lock().push(stage);
+            }
+        });
+        let models = crate::models::Models::new(shared.clone());
+        let pipeline = Pipeline::start(shared, models);
+
+        let transcript = Transcript {
+            segments: vec![Segment {
+                start: 1.0,
+                end: 4.0,
+                speaker: "Speaker 1".into(),
+                text: "sistem videolardan çalışır".into(),
+                confidence: Some(0.9),
+                timing_precision: None,
+                attribution: None,
+            }],
+            ..Default::default()
+        };
+        let corrected = pipeline
+            .inner
+            .post_correct_transcript(&meeting, &settings, transcript)
+            .unwrap();
+        pipeline.stop();
+
+        assert_eq!(corrected.segments.len(), 1);
+        assert_eq!(corrected.segments[0].text, "sistem üzerinden çalışır");
+        assert_eq!(corrected.segments[0].start, 1.0);
+        assert_eq!(corrected.segments[0].end, 4.0);
+        assert_eq!(corrected.segments[0].speaker, "Speaker 1");
+        assert!(stages.lock().contains(&Some(Stage::PostCorrecting)));
+        let audit_path = library
+            .meeting_dir(&meeting)
+            .join(crate::post_correction::AUDIT_FILE_NAME);
+        assert!(audit_path.is_file());
+        let audit_text = std::fs::read_to_string(&audit_path).unwrap();
+        assert!(!audit_text.contains("sk-pipeline-secret"));
     }
 }

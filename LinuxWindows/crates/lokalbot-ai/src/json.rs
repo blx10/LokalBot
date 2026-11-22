@@ -2,8 +2,97 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Map, Value};
 
-pub fn strip_reasoning(text: &str) -> String {
+const HARMONY_ANALYSIS_OPENERS: [&str; 4] = [
+    "<|start|>assistant<|channel|>analysis",
+    "<|start|>assistant<|channel|>commentary",
+    "<|channel|>analysis",
+    "<|channel|>commentary",
+];
+
+const HARMONY_CONTROL_TOKENS: [&str; 13] = [
+    "<|return|>",
+    "<|end|>",
+    "<|call|>",
+    "<|start|>assistant",
+    "<|start|>user",
+    "<|start|>system",
+    "<|start|>",
+    "<|message|>",
+    "<|channel|>final",
+    "<|channel|>analysis",
+    "<|channel|>commentary",
+    "<|constrain|>json",
+    "<|constrain|>",
+];
+
+fn strip_harmony_control_tokens(text: &str) -> String {
+    let mut cleaned = text.to_string();
+    loop {
+        let mut changed = false;
+        if let Some(pos) = cleaned.find("<|constrain|>") {
+            let after = &cleaned[pos + "<|constrain|>".len()..];
+            if let Some(msg_rel) = after.find("<|message|>") {
+                let end = pos + "<|constrain|>".len() + msg_rel + "<|message|>".len();
+                cleaned.replace_range(pos..end, "");
+                changed = true;
+            }
+        }
+        for token in HARMONY_CONTROL_TOKENS {
+            if cleaned.contains(token) {
+                cleaned = cleaned.replace(token, "");
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    cleaned
+}
+
+fn strip_harmony(text: &str) -> String {
+    if !text.contains("<|") {
+        return text.to_string();
+    }
+    if let Some(final_pos) = text.rfind("<|channel|>final") {
+        let after_channel = &text[final_pos + "<|channel|>final".len()..];
+        if let Some(msg_rel) = after_channel.find("<|message|>") {
+            let content_start =
+                final_pos + "<|channel|>final".len() + msg_rel + "<|message|>".len();
+            let rest = &text[content_start..];
+            let end_rel = ["<|return|>", "<|end|>", "<|start|>"]
+                .into_iter()
+                .filter_map(|marker| rest.find(marker))
+                .min()
+                .unwrap_or(rest.len());
+            return strip_harmony_control_tokens(&rest[..end_rel])
+                .trim()
+                .to_string();
+        }
+    }
     let mut result = text.to_string();
+    loop {
+        let earliest = HARMONY_ANALYSIS_OPENERS
+            .into_iter()
+            .filter_map(|opener| result.find(opener).map(|pos| (pos, opener)))
+            .min_by_key(|(pos, _)| *pos);
+        let Some((open, opener)) = earliest else {
+            break;
+        };
+        let search_from = open + opener.len();
+        if let Some(close_rel) = result[search_from..].find("<|end|>") {
+            let close = search_from + close_rel + "<|end|>".len();
+            result.replace_range(open..close, "");
+        } else {
+            result.truncate(open);
+            break;
+        }
+    }
+    strip_harmony_control_tokens(&result).trim().to_string()
+}
+
+pub fn strip_reasoning(text: &str) -> String {
+    let mut result = strip_harmony(text);
     while let Some(open) = result.find("<think>") {
         let Some(close_rel) = result[open + 7..].find("</think>") else {
             break;
@@ -15,8 +104,36 @@ pub fn strip_reasoning(text: &str) -> String {
 }
 
 pub fn visible_text_of_truncated(reply: &str) -> String {
-    match reply.find("<think>") {
-        Some(open) => reply[..open].trim().to_string(),
+    if let Some(final_pos) = reply.rfind("<|channel|>final") {
+        let after_channel = &reply[final_pos + "<|channel|>final".len()..];
+        if let Some(msg_rel) = after_channel.find("<|message|>") {
+            let start = final_pos + "<|channel|>final".len() + msg_rel + "<|message|>".len();
+            let rest = &reply[start..];
+            let end = ["<think>", "<|end|>", "<|return|>", "<|start|>"]
+                .into_iter()
+                .filter_map(|marker| rest.find(marker))
+                .min()
+                .unwrap_or(rest.len());
+            return strip_harmony_control_tokens(&rest[..end])
+                .trim()
+                .to_string();
+        }
+    }
+    let earliest_hidden = [
+        "<think>",
+        "<|start|>assistant<|channel|>analysis",
+        "<|start|>assistant<|channel|>commentary",
+        "<|channel|>analysis",
+        "<|channel|>commentary",
+    ]
+    .into_iter()
+    .filter_map(|marker| reply.find(marker))
+    .min();
+    match earliest_hidden {
+        Some(open) => strip_harmony_control_tokens(&reply[..open])
+            .trim()
+            .to_string(),
+        None if reply.contains("<|") => strip_harmony_control_tokens(reply).trim().to_string(),
         None => reply.to_string(),
     }
 }
@@ -255,5 +372,35 @@ mod tests {
     fn code_fences_are_stripped() {
         assert_eq!(strip_code_fence("```json\n{\"a\":1}\n```"), "{\"a\":1}");
         assert_eq!(strip_code_fence("plain"), "plain");
+    }
+
+    #[test]
+    fn harmony_analysis_and_final_channels_are_stripped() {
+        let raw = "<|start|>assistant<|channel|>analysis<|message|>thinking step<|end|><|start|>assistant<|channel|>final<|message|>{\"candidates\":[]}<|return|>";
+        assert_eq!(strip_reasoning(raw), "{\"candidates\":[]}");
+        let parsed = parse_object(raw).unwrap();
+        assert_eq!(parsed["candidates"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn harmony_constrain_json_between_channel_and_message_is_handled() {
+        let raw = "<|channel|>analysis<|message|>plan<|end|><|channel|>final<|constrain|>json<|message|>{\"ok\":true}<|return|>";
+        assert_eq!(strip_reasoning(raw), "{\"ok\":true}");
+    }
+
+    #[test]
+    fn harmony_tokens_combined_with_think_tags_are_stripped() {
+        let raw = "<|channel|>analysis<|message|>reason<|end|><|start|>assistant<|channel|>final<|message|><think>more thinking</think>{\"x\":2}<|call|>";
+        assert_eq!(strip_reasoning(raw), "{\"x\":2}");
+    }
+
+    #[test]
+    fn truncated_harmony_analysis_hides_incomplete_reasoning() {
+        let truncated = "Prefix <|channel|>analysis<|message|>incomplete thought";
+        assert_eq!(visible_text_of_truncated(truncated), "Prefix");
+        assert_eq!(strip_reasoning("<|channel|>analysis<|message|>incomplete"), "");
+        let final_truncated =
+            "<|channel|>analysis<|message|>done<|end|><|channel|>final<|message|>{\"a\":1";
+        assert_eq!(visible_text_of_truncated(final_truncated), "{\"a\":1");
     }
 }

@@ -343,6 +343,7 @@ struct Installer {
     active: Mutex<Option<LlamaBackend>>,
     devices: Mutex<HashMap<PathBuf, std::result::Result<GpuDevice, String>>>,
     devices_stale: AtomicBool,
+    local_server_disabled: AtomicBool,
     lock: Mutex<()>,
 }
 
@@ -1546,6 +1547,12 @@ impl ServerInner {
 
     fn start(&self, model_id: &str, model_path: &Path) -> Result<Running> {
         let installer = &self.installer;
+        if installer.local_server_disabled.load(Ordering::Acquire) {
+            return Err(
+                AiError::Unavailable("Local llama-server is disabled by configuration.".into())
+                    .into(),
+            );
+        }
         let never = AtomicBool::new(false);
         let allow_download = self.role.downloads_runtime() && installer.preference() != "cuda";
         let (backend, record, binary) =
@@ -1990,6 +1997,7 @@ impl RuntimeManager {
             active: Mutex::new(None),
             devices: Mutex::new(HashMap::new()),
             devices_stale: AtomicBool::new(false),
+            local_server_disabled: AtomicBool::new(false),
             lock: Mutex::new(()),
         });
         let server = |role: Role| LlamaServer {
@@ -2031,6 +2039,23 @@ impl RuntimeManager {
         &self.shared.servers[index]
     }
 
+    pub fn set_local_server_disabled(&self, disabled: bool) {
+        self.shared
+            .installer
+            .local_server_disabled
+            .store(disabled, Ordering::Release);
+        if disabled {
+            self.shutdown();
+        }
+    }
+
+    pub fn is_local_server_disabled(&self) -> bool {
+        self.shared
+            .installer
+            .local_server_disabled
+            .load(Ordering::Acquire)
+    }
+
     pub fn set_backend_preference(&self, preference: &str) {
         let installer = &self.shared.installer;
         let mut current = installer.preference.lock();
@@ -2050,6 +2075,12 @@ impl RuntimeManager {
         cancel: &AtomicBool,
         progress: &mut dyn FnMut(u64, u64),
     ) -> Result<()> {
+        if self.is_local_server_disabled() {
+            return Err(
+                AiError::Unavailable("Local llama-server is disabled by configuration.".into())
+                    .into(),
+            );
+        }
         self.set_backend_preference(&settings.llama_backend);
         let installer = &self.shared.installer;
         check_cancelled(cancel)?;
@@ -2078,6 +2109,12 @@ impl RuntimeManager {
         cancel: &AtomicBool,
         progress: &mut dyn FnMut(u64, u64),
     ) -> Result<()> {
+        if self.is_local_server_disabled() {
+            return Err(
+                AiError::Unavailable("Local llama-server is disabled by configuration.".into())
+                    .into(),
+            );
+        }
         self.set_backend_preference(&settings.llama_backend);
         check_cancelled(cancel)?;
         self.shared
@@ -2279,6 +2316,12 @@ impl RuntimeManager {
     }
 
     pub fn main_server_for_task(&self, model: &ModelEntry) -> Result<Lease> {
+        if self.is_local_server_disabled() {
+            return Err(
+                AiError::Unavailable("Local llama-server is disabled by configuration.".into())
+                    .into(),
+            );
+        }
         self.start_reaper();
         self.server(Role::Main).lease_model_for_task(model)
     }
@@ -2300,6 +2343,12 @@ impl RuntimeManager {
     }
 
     pub fn lease(&self, role: Role, model: &ModelEntry) -> Result<Lease> {
+        if self.is_local_server_disabled() {
+            return Err(
+                AiError::Unavailable("Local llama-server is disabled by configuration.".into())
+                    .into(),
+            );
+        }
         self.start_reaper();
         self.server(role).lease_model(model)
     }
@@ -3542,5 +3591,43 @@ mod tests {
         .unwrap();
         *manager.shared.installer.active.lock() = Some(LlamaBackend::Cpu);
         assert!(!manager.main_supports_parallel_unified_kv());
+    }
+
+    #[test]
+    fn disabling_local_llama_server_blocks_runtime_install_and_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = Settings::default();
+        let manager = RuntimeManager::new(LibraryPaths::new(dir.path()), &settings);
+        assert!(!manager.is_local_server_disabled());
+        manager.set_local_server_disabled(true);
+        assert!(manager.is_local_server_disabled());
+
+        let cancel = AtomicBool::new(false);
+        let ensure_err = manager
+            .ensure_runtime(&settings, &cancel, &mut |_, _| {})
+            .unwrap_err();
+        assert!(matches!(
+            ensure_err.downcast_ref::<AiError>(),
+            Some(AiError::Unavailable(_))
+        ));
+        let install_err = manager
+            .install_for_built_in_models(&settings, &cancel, &mut |_, _| {})
+            .unwrap_err();
+        assert!(matches!(
+            install_err.downcast_ref::<AiError>(),
+            Some(AiError::Unavailable(_))
+        ));
+        let entry = catalog::entry("qwen3.5-0.8b").unwrap();
+        let lease_err = manager.main_server(entry).err().unwrap();
+        assert!(matches!(
+            lease_err.downcast_ref::<AiError>(),
+            Some(AiError::Unavailable(_))
+        ));
+        let task_err = manager.main_server_for_task(entry).err().unwrap();
+        assert!(matches!(
+            task_err.downcast_ref::<AiError>(),
+            Some(AiError::Unavailable(_))
+        ));
+        assert!(!dir.path().join("runtimes").exists());
     }
 }

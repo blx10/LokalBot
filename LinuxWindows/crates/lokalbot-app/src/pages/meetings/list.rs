@@ -748,6 +748,7 @@ fn row_stage_label(stage: &ProcessingStage) -> String {
         }
         ProcessingStage::Transcribing => lokalbot_i18n::tr("Transcribing").into(),
         ProcessingStage::IdentifyingSpeakers => lokalbot_i18n::tr("Identifying speakers").into(),
+        ProcessingStage::PostCorrecting => lokalbot_i18n::tr("Refining transcript").into(),
         ProcessingStage::Summarizing => lokalbot_i18n::tr("Summarizing").into(),
         ProcessingStage::WaitingForModels => lokalbot_i18n::tr("Waiting for models").into(),
         ProcessingStage::Failed(_) => lokalbot_i18n::tr("Failed").into(),

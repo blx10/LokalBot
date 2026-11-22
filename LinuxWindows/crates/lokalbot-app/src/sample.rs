@@ -339,6 +339,7 @@ pub fn render_banner(
                 | ProcessingStage::PreparingModel(_)
                 | ProcessingStage::Transcribing
                 | ProcessingStage::IdentifyingSpeakers
+                | ProcessingStage::PostCorrecting
         )
     );
     let summarizing = matches!(stage, Some(ProcessingStage::Summarizing));

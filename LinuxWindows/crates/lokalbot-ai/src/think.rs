@@ -227,7 +227,7 @@ pub struct ThinkClient {
     inner: Arc<Inner>,
 }
 
-fn consent(url: &str, approved: &[String]) -> Result<()> {
+pub(crate) fn consent(url: &str, approved: &[String]) -> Result<()> {
     match remote_block_reason(url, approved) {
         Some(reason) => Err(AiError::ConsentRequired(reason).into()),
         None => Ok(()),
@@ -264,8 +264,20 @@ pub fn allows_automatic_main_inference(settings: &Settings) -> bool {
     .is_none()
 }
 
-fn trimmed_base(url: &str) -> String {
+pub(crate) fn trimmed_base(url: &str) -> String {
     url.trim().trim_end_matches('/').to_string()
+}
+
+pub fn resolve_api_key(config_key: Option<&str>, keyring_key: Option<String>) -> Option<String> {
+    config_key
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            keyring_key
+                .map(|k| k.trim().to_string())
+                .filter(|k| !k.is_empty())
+        })
 }
 
 pub fn list_ollama_models(base_url: &str, approved: &[String]) -> Result<Vec<String>> {
@@ -294,6 +306,13 @@ impl ThinkClient {
     pub fn new(runtime: &RuntimeManager, settings: &Settings) -> Result<Self> {
         let backend = match settings.summarizer_backend {
             SummarizerBackend::BuiltIn => {
+                if runtime.is_local_server_disabled() {
+                    return Err(AiError::Unavailable(
+                        "Local llama-server is disabled by configuration. Choose a remote Think backend."
+                            .into(),
+                    )
+                    .into());
+                }
                 let entry = catalog::entry(&settings.built_in_model_id)
                     .filter(|e| e.kind == catalog::ModelKind::Text)
                     .ok_or_else(|| {
@@ -375,6 +394,21 @@ impl ThinkClient {
             settings.think_reasoning_level,
             Some(runtime.clone()),
         ))
+    }
+
+    pub fn new_with_config_key(
+        runtime: &RuntimeManager,
+        settings: &Settings,
+        config_key: Option<&str>,
+        keyring_key: Option<String>,
+    ) -> Result<Self> {
+        let client = Self::new(runtime, settings)?;
+        Ok(match settings.summarizer_backend {
+            SummarizerBackend::OpenAICompatible => {
+                client.with_api_key_precedence(config_key, keyring_key)
+            }
+            _ => client,
+        })
     }
 
     pub fn llama_server(base_url: &str, token: &str, model_id: &str) -> Self {
@@ -554,6 +588,14 @@ impl ThinkClient {
             _ => {}
         }
         self.rebuilt(backend, self.inner.level)
+    }
+
+    pub fn with_api_key_precedence(
+        self,
+        config_key: Option<&str>,
+        keyring_key: Option<String>,
+    ) -> Self {
+        self.with_api_key(resolve_api_key(config_key, keyring_key))
     }
 
     pub fn with_openrouter_data_policy(self, policy: OpenRouterDataPolicy) -> Self {
@@ -1666,7 +1708,7 @@ pub(crate) fn with_data_policy(mut body: Value, policy: OpenRouterDataPolicy) ->
     body
 }
 
-fn parse_chat_completion(json: &Value) -> Result<Completion> {
+pub(crate) fn parse_chat_completion(json: &Value) -> Result<Completion> {
     let choice = json
         .get("choices")
         .and_then(Value::as_array)
@@ -3896,6 +3938,61 @@ mod tests {
     }
 
     #[test]
+    fn config_api_key_takes_precedence_over_keyring_key() {
+        assert_eq!(
+            resolve_api_key(Some("  sk-config-1  "), Some("sk-keyring-2".into())),
+            Some("sk-config-1".into())
+        );
+        assert_eq!(
+            resolve_api_key(Some("   "), Some("  sk-keyring-2 ".into())),
+            Some("sk-keyring-2".into())
+        );
+        assert_eq!(resolve_api_key(None, Some("".into())), None);
+
+        let server = llama_stub(|_| chat_reply("ok", "stop"));
+        let dir = tempfile::tempdir().unwrap();
+        let settings = Settings {
+            summarizer_backend: SummarizerBackend::OpenAICompatible,
+            openai_base_url: server.url("/v1"),
+            openai_model: "Qwen3.8-27B".into(),
+            ..Settings::default()
+        };
+        let runtime = RuntimeManager::new(lokalbot_core::LibraryPaths::new(dir.path()), &settings);
+        let client = ThinkClient::new_with_config_key(
+            &runtime,
+            &settings,
+            Some("sk-config-priority"),
+            Some("sk-keyring-fallback".into()),
+        )
+        .unwrap();
+        assert_eq!(client.complete(&ChatRequest::new("s", "u")).unwrap(), "ok");
+        let sent = server.requests().pop().unwrap();
+        assert_eq!(
+            sent.header("authorization").as_deref(),
+            Some("Bearer sk-config-priority")
+        );
+
+        let fallback_client = ThinkClient::new_with_config_key(
+            &runtime,
+            &settings,
+            Some("   "),
+            Some("sk-keyring-fallback".into()),
+        )
+        .unwrap();
+        assert_eq!(
+            fallback_client
+                .complete(&ChatRequest::new("s", "u"))
+                .unwrap(),
+            "ok"
+        );
+        let sent_fallback = server.requests().pop().unwrap();
+        assert_eq!(
+            sent_fallback.header("authorization").as_deref(),
+            Some("Bearer sk-keyring-fallback")
+        );
+    }
+
+    #[test]
     fn off_request_always_sends_zero_thinking_budget_on_llama_server() {
         let support = ReasoningSupport::built_in_id("lfm2.5-2.6b");
         let req = ChatRequest::new("sys", "hello")
@@ -3990,5 +4087,40 @@ mod tests {
             .unwrap();
         assert!(completion.cancelled);
         assert_eq!(server.requests().len(), 1);
+    }
+
+    #[test]
+    fn disabled_local_llama_server_blocks_built_in_think_client() {
+        let server = llama_stub(|_| chat_reply("remote ok", "stop"));
+        let dir = tempfile::tempdir().unwrap();
+        let mut settings = Settings::default();
+        let runtime = RuntimeManager::new(lokalbot_core::LibraryPaths::new(dir.path()), &settings);
+        runtime.set_local_server_disabled(true);
+
+        let built_in_err = ThinkClient::new(&runtime, &settings).err().unwrap();
+        assert!(matches!(
+            built_in_err.downcast_ref::<AiError>(),
+            Some(AiError::Unavailable(_))
+        ));
+
+        settings.summarizer_backend = SummarizerBackend::OpenAICompatible;
+        settings.openai_base_url = server.url("/v1");
+        settings.openai_model = "Qwen3.8-27B".into();
+        let remote = ThinkClient::new_with_config_key(
+            &runtime,
+            &settings,
+            Some("sk-remote-think"),
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            remote.complete(&ChatRequest::new("s", "u")).unwrap(),
+            "remote ok"
+        );
+        let sent = server.requests().pop().unwrap();
+        assert_eq!(
+            sent.header("authorization").as_deref(),
+            Some("Bearer sk-remote-think")
+        );
     }
 }

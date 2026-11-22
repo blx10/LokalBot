@@ -370,7 +370,7 @@ impl Host for EngineHost {
     }
 
     fn run(&self, job: &JobKind, settings: &Settings, cancel: &AtomicBool) -> Outcome {
-        let think_key = || crate::effective_openai_api_key(settings);
+        let think_key = || crate::secrets::resolve_openai_api_key(settings);
         let keys = server::Keys {
             think: &think_key,
             server: &crate::secrets::autocomplete_server_api_key,

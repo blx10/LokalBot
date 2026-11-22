@@ -178,6 +178,7 @@ pub enum ProcessingStage {
     PreparingModel(SharedString),
     Transcribing,
     IdentifyingSpeakers,
+    PostCorrecting,
     Summarizing,
     Failed(SharedString),
 }
