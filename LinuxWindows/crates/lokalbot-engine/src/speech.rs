@@ -1,19 +1,119 @@
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use lokalbot_ai::remote_transcription::Client;
-use lokalbot_core::Settings;
+use lokalbot_core::{LibraryPaths, Settings};
 use lokalbot_core::remote_transcription::{RemoteTranscription, request_key};
 use parking_lot::Mutex;
 
-use lokalbot_speech::models::{accepts_vocabulary, is_remote};
-use lokalbot_speech::{SpeechServer, Transcriber};
+use lokalbot_speech::models::{
+    WHISPER_TURBO_MODEL, WHISPER_TURBO_TR_KHAN_MODEL, ZIPFORMER_OAYK_MODEL, accepts_vocabulary,
+    is_remote,
+};
+use lokalbot_speech::{
+    ComputeDevice, ModelSlotConfig, MultiSttProgress, MultiSttResult, MultiSttRunner,
+    SpeechServer, TranscribeOptions, Transcriber,
+};
 
 use crate::Shared;
 
 const IDLE_UNLOAD: Duration = Duration::from_secs(120);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExecutionDevice {
+    IGpu,
+    Cpu,
+}
+
+impl ExecutionDevice {
+    pub fn to_speech(self) -> ComputeDevice {
+        match self {
+            Self::IGpu => ComputeDevice::Igpu,
+            Self::Cpu => ComputeDevice::Cpu,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SttModelSlot {
+    pub id: String,
+    pub device: ExecutionDevice,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MultiSttConfig {
+    pub enabled: bool,
+    pub primary: SttModelSlot,
+    pub tr_backup: SttModelSlot,
+    pub fast_helper: SttModelSlot,
+    pub language: Option<String>,
+    pub cpu_threads: usize,
+    pub auto_fallback_to_cpu: bool,
+    pub diarize: bool,
+    pub microphone_is_user: bool,
+    pub models_dir: Option<PathBuf>,
+    pub whisper_server_bin: Option<PathBuf>,
+}
+
+impl Default for MultiSttConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            ..Self::bundled_default()
+        }
+    }
+}
+
+impl MultiSttConfig {
+    pub fn bundled_default() -> Self {
+        Self {
+            enabled: true,
+            primary: SttModelSlot {
+                id: WHISPER_TURBO_MODEL.to_string(),
+                device: ExecutionDevice::IGpu,
+            },
+            tr_backup: SttModelSlot {
+                id: WHISPER_TURBO_TR_KHAN_MODEL.to_string(),
+                device: ExecutionDevice::IGpu,
+            },
+            fast_helper: SttModelSlot {
+                id: ZIPFORMER_OAYK_MODEL.to_string(),
+                device: ExecutionDevice::Cpu,
+            },
+            language: Some("tr".to_string()),
+            cpu_threads: 6,
+            auto_fallback_to_cpu: true,
+            diarize: true,
+            microphone_is_user: true,
+            models_dir: None,
+            whisper_server_bin: None,
+        }
+    }
+
+    pub fn to_speech_config(&self) -> lokalbot_speech::MultiSttConfig {
+        lokalbot_speech::MultiSttConfig {
+            primary: ModelSlotConfig {
+                id: self.primary.id.clone(),
+                device: self.primary.device.to_speech(),
+            },
+            tr_backup: ModelSlotConfig {
+                id: self.tr_backup.id.clone(),
+                device: self.tr_backup.device.to_speech(),
+            },
+            fast_helper: ModelSlotConfig {
+                id: self.fast_helper.id.clone(),
+                device: self.fast_helper.device.to_speech(),
+            },
+            cpu_threads: self.cpu_threads,
+            auto_fallback_to_cpu: self.auto_fallback_to_cpu,
+            models_dir: self.models_dir.clone(),
+            whisper_server_bin: self.whisper_server_bin.clone(),
+        }
+    }
+}
 
 #[derive(Default)]
 pub struct SpeechCache {
@@ -111,6 +211,59 @@ impl SpeechCache {
         let result = f(&transcriber);
         self.used(&transcriber);
         result
+    }
+
+    pub fn unload(&self) {
+        let mut loaded = self.loaded.lock();
+        while loaded
+            .as_ref()
+            .is_some_and(|l| Arc::strong_count(&l.transcriber) > 1)
+        {
+            drop(loaded);
+            std::thread::sleep(Duration::from_millis(50));
+            loaded = self.loaded.lock();
+        }
+        *loaded = None;
+    }
+
+    pub fn run_multi_stt(
+        &self,
+        paths: &LibraryPaths,
+        config: &MultiSttConfig,
+        mic: Option<&Path>,
+        system: Option<&Path>,
+        options: &TranscribeOptions,
+        progress: &mut dyn FnMut(MultiSttProgress),
+    ) -> Result<MultiSttResult> {
+        self.stand_aside();
+        self.unload();
+        let runner = MultiSttRunner::new(paths.clone(), config.to_speech_config());
+        runner.transcribe_meeting_multi(mic, system, options, progress)
+    }
+
+    pub(crate) fn run_multi_stt_with_shared(
+        &self,
+        shared: &Shared,
+        config: &MultiSttConfig,
+        mic: Option<&Path>,
+        system: Option<&Path>,
+        options: &TranscribeOptions,
+        progress: &mut dyn FnMut(MultiSttProgress),
+    ) -> Result<MultiSttResult> {
+        let mut wrapped = |event: MultiSttProgress| {
+            if matches!(event, MultiSttProgress::Transcribing { .. }) {
+                self.stand_aside();
+            }
+            progress(event);
+        };
+        self.run_multi_stt(
+            shared.library.paths(),
+            config,
+            mic,
+            system,
+            options,
+            &mut wrapped,
+        )
     }
 
     pub fn stand_aside(&self) {
@@ -386,5 +539,26 @@ mod tests {
         go_on.send(()).unwrap();
         pass.join().unwrap().unwrap();
         assert_eq!(answer.recv_timeout(Duration::from_secs(5)), Ok(true));
+    }
+
+    #[test]
+    fn speech_cache_unloads_previous_model_before_multi_stt() {
+        let (dir, shared) = loaded();
+        assert!(shared.speech.is_loaded(MODEL));
+        let wav = dir.path().join("short.wav");
+        lokalbot_audio::write_wav_16k(&wav, &vec![0.0f32; 1600]).unwrap();
+        let res = shared
+            .speech
+            .run_multi_stt(
+                shared.library.paths(),
+                &MultiSttConfig::bundled_default(),
+                None,
+                Some(&wav),
+                &TranscribeOptions::default(),
+                &mut |_| {},
+            )
+            .unwrap();
+        assert!(res.segments.is_empty());
+        assert!(!shared.speech.is_loaded(MODEL));
     }
 }

@@ -56,6 +56,43 @@ fn is_bleed_filter_safe(precision: Option<TimingPrecision>) -> bool {
     )
 }
 
+pub(crate) fn sanitize_segment_text(
+    raw: &str,
+    duration: f64,
+    precision: Option<TimingPrecision>,
+    echo: Option<&PromptEcho>,
+) -> Option<String> {
+    let original = normalized_text(raw);
+    if original.is_empty() {
+        return Some(String::new());
+    }
+    let character_cleaned = collapse_extreme_character_runs(&original);
+    let original_words = words(&character_cleaned);
+    if echo.is_some_and(|e| e.matches(&original)) {
+        return None;
+    }
+    let mut final_text = character_cleaned.clone();
+    let mut remaining = original_words.len();
+    let duration = duration.max(0.25);
+    let rate = original_words.len() as f64 / duration;
+    if original_words.len() >= 32 && rate >= 6.0 {
+        let (collapsed, removed) = collapse_repeated_cycles(&original_words, &character_cleaned);
+        let impossible_rate = original_words.len() >= 80 && rate >= 12.0;
+        let dominated_by_loop = removed as f64 / original_words.len() as f64 >= 0.8;
+        if removed > 0 && (impossible_rate || dominated_by_loop) {
+            final_text = collapsed;
+            remaining -= removed;
+        }
+    }
+    if is_bleed_filter_safe(precision)
+        && remaining >= IMPLAUSIBLE_MIN_WORDS
+        && remaining as f64 / duration >= IMPLAUSIBLE_WORDS_PER_SECOND
+    {
+        return None;
+    }
+    Some(normalized_text(&final_text))
+}
+
 pub fn sanitize(transcript: &mut Transcript, prompt: Option<&str>) -> SanitizeReport {
     let echo = PromptEcho::new(prompt);
     let mut report = SanitizeReport::default();
@@ -66,46 +103,30 @@ pub fn sanitize(transcript: &mut Transcript, prompt: Option<&str>) -> SanitizeRe
             kept.push(segment);
             continue;
         }
-        let character_cleaned = collapse_extreme_character_runs(&original);
-        let original_words = words(&character_cleaned);
-        if echo.as_ref().is_some_and(|e| e.matches(&original)) {
-            report.removed_segments += 1;
-            report.removed_words += original_words.len();
-            continue;
-        }
-        let mut final_text = character_cleaned.clone();
-        let mut remaining = original_words.len();
-        let duration = (segment.end - segment.start).max(0.25);
-        let rate = original_words.len() as f64 / duration;
-        if original_words.len() >= 32 && rate >= 6.0 {
-            let (collapsed, removed) =
-                collapse_repeated_cycles(&original_words, &character_cleaned);
-            let impossible_rate = original_words.len() >= 80 && rate >= 12.0;
-            let dominated_by_loop = removed as f64 / original_words.len() as f64 >= 0.8;
-            if removed > 0 && (impossible_rate || dominated_by_loop) {
-                final_text = collapsed;
-                report.removed_words += removed;
-                remaining -= removed;
+        let original_count = words(&collapse_extreme_character_runs(&original)).len();
+        match sanitize_segment_text(
+            &segment.text,
+            segment.end - segment.start,
+            segment.timing_precision,
+            echo.as_ref(),
+        ) {
+            None => {
+                report.removed_segments += 1;
+                report.removed_words += original_count;
+            }
+            Some(final_text) if final_text == original => {
+                kept.push(segment);
+            }
+            Some(final_text) => {
+                let final_count = words(&final_text).len();
+                report.removed_words += original_count.saturating_sub(final_count);
+                report.changed_segments += 1;
+                kept.push(Segment {
+                    text: final_text,
+                    ..segment
+                });
             }
         }
-        if is_bleed_filter_safe(segment.timing_precision)
-            && remaining >= IMPLAUSIBLE_MIN_WORDS
-            && remaining as f64 / duration >= IMPLAUSIBLE_WORDS_PER_SECOND
-        {
-            report.removed_segments += 1;
-            report.removed_words += remaining;
-            continue;
-        }
-        let final_text = normalized_text(&final_text);
-        if final_text == original {
-            kept.push(segment);
-            continue;
-        }
-        report.changed_segments += 1;
-        kept.push(Segment {
-            text: final_text,
-            ..segment
-        });
     }
     transcript.segments = kept;
     report

@@ -700,6 +700,66 @@ impl Inner {
     }
 }
 
+#[allow(dead_code)]
+pub(crate) fn transcribe_meeting_multi_stt(
+    shared: &Shared,
+    meeting: &Meeting,
+    config: &crate::speech::MultiSttConfig,
+    mic: Option<&std::path::Path>,
+    system: Option<&std::path::Path>,
+    options: &lokalbot_speech::TranscribeOptions,
+    progress: &mut dyn FnMut(lokalbot_speech::MultiSttProgress),
+) -> Result<(Transcript, lokalbot_speech::MultiSttResult)> {
+    let library = &shared.library;
+    let detailed = shared
+        .speech
+        .run_multi_stt_with_shared(shared, config, mic, system, options, progress)
+        .context("multi-stt transcription")?;
+    let mut transcript = detailed.transcript.clone();
+    if let Some(range) = meeting.valid_content_range() {
+        range.apply(&mut transcript);
+    }
+    let previous = library.transcript(meeting)?;
+    let memory = crate::voice::memory(library);
+    let evidence = crate::voice::microphone_evidence(
+        library,
+        meeting,
+        &transcript,
+        &detailed.turns,
+        &detailed.samples,
+    );
+    let identified = memory.process(lokalbot_core::voice::ProcessRequest {
+        transcript: &transcript,
+        meeting,
+        turns: &detailed.turns,
+        evidence,
+        mic,
+        system,
+        previous: previous.as_ref(),
+        name_automatically: crate::voice::NAME_SPEAKERS_AUTOMATICALLY,
+    });
+    transcript = match identified {
+        Ok(named) => named,
+        Err(err) => {
+            log::warn!("speaker identity skipped meeting={}: {err}", meeting.id);
+            memory.note_unavailable(meeting.id, &err);
+            if let Some(previous) = &previous {
+                transcript.carry_speaker_names_from(previous);
+            }
+            transcript
+        }
+    };
+    let transcript = finished_transcript(
+        meeting,
+        &library.meeting_dir(meeting),
+        previous.as_ref(),
+        transcript,
+        options.vocabulary_prompt.as_deref(),
+    )?;
+    let transcript = memory.applying_latest_decision(&transcript, meeting.id);
+    Ok((transcript, detailed))
+}
+
 fn finished_transcript(
     meeting: &Meeting,
     folder: &std::path::Path,

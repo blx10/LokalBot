@@ -38,9 +38,11 @@ has its own section, [LokalBot for Linux and Windows](#lokalbot-for-linux-and-wi
 | Gemma 4 E2B (LokalBot v4) (downloaded on request; LokalBot fine-tune of google/gemma-4-E2B) | Apache-2.0 | https://ai.google.dev/gemma/docs/gemma_4_license / https://huggingface.co/stevyhacker/Gemma-4-E2B-LokalBot-GGUF |
 | Qwen3-ASR 1.7B (LokalBot v3) and Qwen3-ASR 0.6B (LokalBot v1) (downloaded on request; LokalBot fine-tunes of Qwen/Qwen3-ASR-1.7B and Qwen/Qwen3-ASR-0.6B) | Apache-2.0 | https://huggingface.co/stevyhacker/Qwen3-ASR-1.7B-LokalBot-GGUF / https://huggingface.co/stevyhacker/Qwen3-ASR-0.6B-LokalBot-GGUF |
 
-Downloaded AI models are not bundled with LokalBot. Each model remains subject
-to the license shown by its publisher; review that license before downloading
-or using a model, especially in a commercial setting. LFM's terms include a
+Upstream default installers do not bundle downloaded AI models; bundled
+multi-STT builds include the MIT and Apache-2.0 speech models listed under
+[Bundled speech models](#bundled-speech-models). Each model remains subject to
+the license shown by its publisher; review that license before downloading or
+using a model, especially in a commercial setting. LFM's terms include a
 commercial-use revenue threshold and redistribution notice obligations; users
 outside those terms must obtain a separate license from Liquid AI.
 
@@ -155,6 +157,7 @@ contain:
 | JSON for Modern C++ | 3.12.0 | MIT | https://github.com/nlohmann/json |
 | piper-phonemize (fork) | commit f3ff95a | MIT | https://github.com/csukuangfj/piper-phonemize |
 | eSpeak NG (fork), with ucd-tools | commit ed530aa | GPL-3.0-or-later; the Unicode data it includes is under the Unicode license (`LICENSES/Unicode-DFS-2016.txt`) | https://github.com/csukuangfj/espeak-ng |
+| whisper.cpp (`whisper-server`) | b5907 (`5eaee0cc`) | MIT | https://github.com/ggml-org/whisper.cpp |
 
 eSpeak NG and piper-phonemize belong to sherpa-onnx's text-to-speech code.
 LokalBot doesn't use it, but the sherpa-onnx library links it. eSpeak NG's
@@ -174,6 +177,7 @@ Copyright notices for these libraries:
   2015-2017 Reece H. Dunn; and the eSpeak NG contributors. ucd-tools:
   Copyright (C) 2012-2018, 2021 Reece H. Dunn. Unicode data: Copyright ©
   1991-2018 Unicode, Inc.
+- whisper.cpp: Copyright (c) 2023-2026 The ggml authors.
 
 On Linux, `freetype-sys` compiles its bundled FreeType (FreeType License or
 GPL-2.0-or-later) only when the build machine has no FreeType of its own; the
@@ -205,9 +209,23 @@ protect them at least as much as Microsoft's own terms.
 | Lucide icons, through GPUI Kit's `gpui-kit-assets` | ISC | Copyright (c) 2026 Lucide Icons and Contributors, https://github.com/lucide-icons/lucide |
 | Lucide icons derived from Feather (listed in `LICENSES/rust-crates.md` under `gpui-kit-assets`) | MIT | Copyright (c) 2013-present Cole Bemis, https://github.com/feathericons/feather |
 
+### Bundled speech models
+
+Bundled multi-STT builds ship with the following pre-converted/packaged speech
+models (MIT and Apache-2.0):
+
+| Model | Used for | License | Source |
+| --- | --- | --- | --- |
+| Whisper large-v3 turbo (`whisper-turbo`) | primary transcription | MIT | https://huggingface.co/openai/whisper-large-v3-turbo / https://huggingface.co/deepdml/faster-whisper-large-v3-turbo-ct2 |
+| Whisper large-v3 turbo Turkish — Khan Academy fine-tune (`whisper-turbo-tr-khan`) | Turkish backup transcription | MIT | https://huggingface.co/ysdede/whisper-khanacademy-large-v3-turbo-tr / https://huggingface.co/ysdede/whisper-khanacademy-large-v3-turbo-tr-ct2 |
+| Zipformer Turkish v1 (`zipformer-oayk`) | fast helper transcription | Apache-2.0 | https://huggingface.co/oayk/zipformer-asr-turkish-v1 |
+| Silero VAD (`silero-vad`) | finding speech | MIT | https://github.com/snakers4/silero-vad |
+| pyannote segmentation 3.0 (`pyannote-segmentation-3.0`) | telling speakers apart | MIT | https://huggingface.co/pyannote/segmentation-3.0 |
+| TitaNet-S, NVIDIA NeMo (`speaker-titanet-small`) | recognizing voices | Apache-2.0 | https://catalog.ngc.nvidia.com/orgs/nvidia/teams/nemo/models/titanet_small |
+
 ### Downloaded on request
 
-The app doesn't include any AI model. It downloads the ones below when you
+Upstream builds without bundled models download the ones below when you
 choose them, or when you turn on a feature that needs them, and each stays
 under the license of the model it comes from. The speech models are
 sherpa-onnx's ONNX conversions from its `asr-models`,

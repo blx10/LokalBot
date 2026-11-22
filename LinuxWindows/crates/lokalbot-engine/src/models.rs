@@ -11,6 +11,12 @@ use crate::{BackgroundItem, BackgroundKind, DownloadUpdate, EngineEvent, ModelSt
 
 pub const RUNTIME_ID: &str = "llama-runtime";
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SpeechRequirements {
+    pub model_ids: Vec<String>,
+    pub include_local_think_runtime: bool,
+}
+
 #[derive(Clone)]
 pub struct Models {
     shared: Arc<Shared>,
@@ -54,10 +60,20 @@ impl Models {
     }
 
     pub fn is_installed(&self, id: &str) -> bool {
+        self.is_installed_with(id, &lokalbot_speech::SpeechModelPaths::default())
+    }
+
+    pub fn is_installed_with(
+        &self,
+        id: &str,
+        resolver: &lokalbot_speech::SpeechModelPaths,
+    ) -> bool {
         let paths = self.shared.library.paths();
         match Self::resolve(id) {
             Some(ModelRef::Gguf(entry)) => lokalbot_ai::catalog::is_downloaded(paths, entry),
-            Some(ModelRef::Speech(model)) => lokalbot_speech::models::is_installed(paths, model),
+            Some(ModelRef::Speech(model)) => {
+                lokalbot_speech::models::is_installed_with(paths, resolver, model)
+            }
             Some(ModelRef::Runtime) => self.shared.runtime.usable_backend().is_some(),
             Some(ModelRef::Ocr) => lokalbot_ai::ocr::is_installed(paths),
             Some(ModelRef::OcrLanguages) => lokalbot_ai::ocr::status(paths)
@@ -104,6 +120,74 @@ impl Models {
                 vec![settings.built_in_model_id.clone(), RUNTIME_ID.to_string()]
             }
             _ => Vec::new(),
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn multi_stt_requirements(config: &crate::speech::MultiSttConfig) -> Vec<String> {
+        let mut ids = vec![
+            config.primary.id.clone(),
+            config.tr_backup.id.clone(),
+            config.fast_helper.id.clone(),
+        ];
+        ids.extend(lokalbot_speech::models::supporting_ids(config.diarize));
+        let mut seen = std::collections::HashSet::new();
+        ids.retain(|id| seen.insert(id.clone()));
+        ids
+    }
+
+    #[allow(dead_code)]
+    pub fn speech_requirements(
+        multi_stt: Option<&crate::speech::MultiSttConfig>,
+        single_model_id: &str,
+        diarize: bool,
+    ) -> Vec<String> {
+        if let Some(cfg) = multi_stt.filter(|c| c.enabled) {
+            return Self::multi_stt_requirements(cfg);
+        }
+        let mut ids = if lokalbot_speech::models::is_remote(single_model_id) {
+            Vec::new()
+        } else {
+            vec![single_model_id.to_string()]
+        };
+        ids.extend(lokalbot_speech::models::supporting_ids(diarize));
+        ids
+    }
+
+    #[allow(dead_code)]
+    pub fn think_requirements_with(&self, disable_local_llama_server: bool) -> Vec<String> {
+        if disable_local_llama_server {
+            Vec::new()
+        } else {
+            self.think_requirements()
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn meeting_requirements_with(
+        &self,
+        summarize: bool,
+        multi_stt: Option<&crate::speech::MultiSttConfig>,
+        disable_local_llama_server: bool,
+    ) -> SpeechRequirements {
+        let settings = self.shared.settings();
+        let mut model_ids = Self::speech_requirements(
+            multi_stt,
+            &settings.transcription_model,
+            settings.multi_speaker_diarization,
+        );
+        let think = if summarize {
+            self.think_requirements_with(disable_local_llama_server)
+        } else {
+            Vec::new()
+        };
+        let include_local_think_runtime = think.iter().any(|id| id == RUNTIME_ID);
+        model_ids.extend(think);
+        let mut seen = std::collections::HashSet::new();
+        model_ids.retain(|id| seen.insert(id.clone()));
+        SpeechRequirements {
+            model_ids,
+            include_local_think_runtime,
         }
     }
 
@@ -419,6 +503,12 @@ impl Models {
                 lokalbot_ai::download::download(&spec, cancel, &mut progress)
             }
             ModelRef::Speech(model) => {
+                if !model.is_downloadable() {
+                    anyhow::bail!(
+                        "{} is bundled and cannot be downloaded",
+                        model.display_name
+                    );
+                }
                 let info = lokalbot_speech::models::download_info(model);
                 let spec = lokalbot_ai::download::DownloadSpec {
                     url: info.url,
@@ -768,5 +858,55 @@ mod tests {
         assert_eq!(failed.unwrap_err().to_string(), "no network");
         let empty = install_all(&ids(&["asr"]), |_| false, |_| false, |_| Ok(()), || {});
         assert_eq!(empty.unwrap_err().to_string(), "asr is not installed");
+    }
+
+    #[test]
+    fn speech_requirements_include_all_three_models_and_diarization() {
+        let cfg = crate::speech::MultiSttConfig::bundled_default();
+        let ids = Models::speech_requirements(Some(&cfg), "qwen3-asr-0.6b", false);
+        assert_eq!(
+            ids,
+            vec![
+                "whisper-turbo",
+                "whisper-turbo-tr-khan",
+                "zipformer-oayk",
+                "silero-vad",
+                "pyannote-segmentation-3.0",
+                "speaker-titanet-small",
+            ]
+        );
+        let disabled = crate::speech::MultiSttConfig::default();
+        let single = Models::speech_requirements(Some(&disabled), "qwen3-asr-0.6b", false);
+        assert_eq!(single, vec!["qwen3-asr-0.6b", "silero-vad"]);
+    }
+
+    #[test]
+    fn think_requirements_with_disable_local_llama_server_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let library =
+            lokalbot_core::Library::open(lokalbot_core::LibraryPaths::new(dir.path())).unwrap();
+        let shared = Shared::for_tests(library, Default::default(), |_| {});
+        let models = Models::new(shared);
+        assert!(!models.think_requirements_with(false).is_empty());
+        assert!(models.think_requirements_with(true).is_empty());
+        let reqs = models.meeting_requirements_with(
+            true,
+            Some(&crate::speech::MultiSttConfig::bundled_default()),
+            true,
+        );
+        assert!(!reqs.include_local_think_runtime);
+        assert!(!reqs.model_ids.iter().any(|id| id == RUNTIME_ID));
+        assert!(reqs.model_ids.iter().any(|id| id == "whisper-turbo"));
+    }
+
+    #[test]
+    fn bundled_model_download_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let library =
+            lokalbot_core::Library::open(lokalbot_core::LibraryPaths::new(dir.path())).unwrap();
+        let shared = Shared::for_tests(library, Default::default(), |_| {});
+        let models = Models::new(shared);
+        let err = models.download_blocking("whisper-turbo").unwrap_err();
+        assert!(err.to_string().contains("bundled"));
     }
 }

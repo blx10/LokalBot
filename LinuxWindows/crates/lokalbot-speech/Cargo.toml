@@ -18,9 +18,22 @@ regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 unicode-normalization.workspace = true
+sha2.workspace = true
+hex.workspace = true
+ureq.workspace = true
 # Static libraries from the k2-fsa release (onnxruntime included); see
 # LinuxWindows/.cargo/config.toml for the Windows CRT setting they need.
 sherpa-onnx = "1.13.8"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -58,10 +58,16 @@ pub use companion::{
     CompanionStatus, PairingRequest,
 };
 pub use events::*;
+pub use lokalbot_speech::{
+    ComputeDevice, DeviceProvenance, ModelPassTelemetry, ModelSlotConfig, MultiSttProgress,
+    MultiSttProvenance, MultiSttResult, MultiSttSegment, SpeechModelPaths,
+};
+pub use models::SpeechRequirements;
 pub use recording::recover_unfinished_recordings;
 pub use resources::{GenerationMetric, LoadedModel, ResourceSampler, ResourceSnapshot};
 pub use selection::{SelectionPhase, SelectionView};
 pub use speak::EXPORT_KEY as SPEECH_EXPORT_KEY;
+pub use speech::{ExecutionDevice, MultiSttConfig, SpeechCache, SttModelSlot};
 
 pub(crate) struct Shared {
     pub library: Library,

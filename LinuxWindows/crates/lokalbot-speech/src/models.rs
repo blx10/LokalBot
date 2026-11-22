@@ -1,8 +1,11 @@
+use std::collections::BTreeMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use lokalbot_core::LibraryPaths;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 const MARKER: &str = ".lokalbot-installed.json";
 
@@ -10,8 +13,10 @@ const MARKER: &str = ".lokalbot-installed.json";
 pub enum Family {
     Qwen3Asr,
     NemoTransducer,
+    ZipformerTransducer,
     SenseVoice,
     Whisper,
+    WhisperGgml,
     NemoCtc,
 }
 
@@ -43,6 +48,8 @@ pub struct SpeechModel {
     pub summary: &'static str,
     pub license: &'static str,
     pub supports_prompt: bool,
+    pub bundled: bool,
+    pub file_sha256s: &'static [(&'static str, &'static str)],
 }
 
 impl SpeechModel {
@@ -59,6 +66,14 @@ impl SpeechModel {
 
     pub fn supports_language(&self, code: &str) -> bool {
         self.languages.contains(&code)
+    }
+
+    pub fn is_downloadable(&self) -> bool {
+        !self.archive.url.is_empty()
+    }
+
+    pub fn is_bundled(&self) -> bool {
+        self.bundled
     }
 }
 
@@ -77,12 +92,16 @@ const WHISPER_LANGUAGES: &[&str] = &[
 ];
 
 pub const DEFAULT_TRANSCRIPTION_MODEL: &str = "qwen3-asr-0.6b";
+pub const WHISPER_TURBO_MODEL: &str = "whisper-turbo";
+pub const WHISPER_TURBO_TR_KHAN_MODEL: &str = "whisper-turbo-tr-khan";
+pub const ZIPFORMER_OAYK_MODEL: &str = "zipformer-oayk";
 pub const VAD_MODEL: &str = "silero-vad";
 pub const SEGMENTATION_MODEL: &str = "pyannote-segmentation-3.0";
 pub const EMBEDDING_MODEL: &str = "speaker-titanet-small";
 pub const KOKORO_MODEL: &str = "kokoro-82m";
+pub const MODELS_DIR_ENV: &str = "LOKALBOT_MODELS_DIR";
 
-static MODELS: [SpeechModel; 10] = [
+static MODELS: [SpeechModel; 13] = [
     SpeechModel {
         id: DEFAULT_TRANSCRIPTION_MODEL,
         display_name: "Qwen3-ASR 0.6B",
@@ -105,6 +124,8 @@ static MODELS: [SpeechModel; 10] = [
         summary: "30 languages and 22 Chinese dialects. Uses meeting names and terms as hints.",
         license: "Apache-2.0",
         supports_prompt: true,
+        bundled: false,
+        file_sha256s: &[],
     },
     SpeechModel {
         id: "parakeet-v3",
@@ -126,6 +147,8 @@ static MODELS: [SpeechModel; 10] = [
         summary: "Fast, with word timings. 25 European languages, detected automatically.",
         license: "CC-BY-4.0",
         supports_prompt: false,
+        bundled: false,
+        file_sha256s: &[],
     },
     SpeechModel {
         id: "sense-voice",
@@ -142,6 +165,8 @@ static MODELS: [SpeechModel; 10] = [
         summary: "Chinese, Japanese, Korean, Cantonese and English. Very fast.",
         license: "FunASR Model License",
         supports_prompt: false,
+        bundled: false,
+        file_sha256s: &[],
     },
     SpeechModel {
         id: "whisper-large-v3-turbo",
@@ -162,6 +187,8 @@ static MODELS: [SpeechModel; 10] = [
         summary: "About 100 languages. Slower on most computers.",
         license: "MIT",
         supports_prompt: false,
+        bundled: false,
+        file_sha256s: &[],
     },
     SpeechModel {
         id: "parakeet-v2",
@@ -183,6 +210,8 @@ static MODELS: [SpeechModel; 10] = [
         summary: "English only, slightly higher recall.",
         license: "CC-BY-4.0",
         supports_prompt: false,
+        bundled: false,
+        file_sha256s: &[],
     },
     SpeechModel {
         id: "gigaam-russian",
@@ -199,6 +228,90 @@ static MODELS: [SpeechModel; 10] = [
         summary: "Russian only.",
         license: "MIT",
         supports_prompt: false,
+        bundled: false,
+        file_sha256s: &[],
+    },
+    SpeechModel {
+        id: WHISPER_TURBO_MODEL,
+        display_name: "Whisper large-v3 turbo (GGML)",
+        kind: ModelKind::Transcription(Family::WhisperGgml),
+        languages: WHISPER_LANGUAGES,
+        archive: DownloadInfo {
+            url: "",
+            sha256: "1e9ac042328920a1cf3156983984fdf16c26d14460fbcd86606a64ebc4f32424",
+            size: 874_188_075,
+            archive_root: None,
+        },
+        files: &["ggml-model.bin"],
+        summary: "Bundled primary Whisper large-v3 turbo Q8_0 model for Vulkan iGPU and CPU.",
+        license: "MIT",
+        supports_prompt: false,
+        bundled: true,
+        file_sha256s: &[(
+            "ggml-model.bin",
+            "1e9ac042328920a1cf3156983984fdf16c26d14460fbcd86606a64ebc4f32424",
+        )],
+    },
+    SpeechModel {
+        id: WHISPER_TURBO_TR_KHAN_MODEL,
+        display_name: "Whisper large-v3 turbo Turkish (Khan Academy)",
+        kind: ModelKind::Transcription(Family::WhisperGgml),
+        languages: &["tr"],
+        archive: DownloadInfo {
+            url: "",
+            sha256: "a64399faa40c4e97e63bfabe3c65aa82b7c425efbe8da811a7cf101462645a8f",
+            size: 874_188_075,
+            archive_root: None,
+        },
+        files: &["ggml-model.bin"],
+        summary: "Bundled Turkish fine-tuned Whisper large-v3 turbo Q8_0 model.",
+        license: "MIT",
+        supports_prompt: false,
+        bundled: true,
+        file_sha256s: &[(
+            "ggml-model.bin",
+            "a64399faa40c4e97e63bfabe3c65aa82b7c425efbe8da811a7cf101462645a8f",
+        )],
+    },
+    SpeechModel {
+        id: ZIPFORMER_OAYK_MODEL,
+        display_name: "Zipformer Turkish v1 (oayk)",
+        kind: ModelKind::Transcription(Family::ZipformerTransducer),
+        languages: &["tr"],
+        archive: DownloadInfo {
+            url: "",
+            sha256: "f997550f7db7da936efdb636d4de8f698dde94673541bfc00d582799276d1646",
+            size: 28_597_937,
+            archive_root: None,
+        },
+        files: &[
+            "encoder.int8.onnx",
+            "decoder.int8.onnx",
+            "joiner.int8.onnx",
+            "tokens.txt",
+        ],
+        summary: "Bundled fast Turkish Zipformer2 transducer helper model (CPU int8).",
+        license: "Apache-2.0",
+        supports_prompt: false,
+        bundled: true,
+        file_sha256s: &[
+            (
+                "encoder.int8.onnx",
+                "f997550f7db7da936efdb636d4de8f698dde94673541bfc00d582799276d1646",
+            ),
+            (
+                "decoder.int8.onnx",
+                "f856a1dc35983cb9090d7f1db9b39c1d38e8ff0b5838f37f6d1f05975c8f8e1d",
+            ),
+            (
+                "joiner.int8.onnx",
+                "560df254116a1c614c427626774ef66d6bb3fbda3eaa0d3d602ce3eae3a04980",
+            ),
+            (
+                "tokens.txt",
+                "d76b4d3fed0e7a6cd9f3d1f294a86dd8e1eb0fdc92454577d3d8b9ca30a01557",
+            ),
+        ],
     },
     SpeechModel {
         id: VAD_MODEL,
@@ -215,6 +328,11 @@ static MODELS: [SpeechModel; 10] = [
         summary: "Finds speech in recordings.",
         license: "MIT",
         supports_prompt: false,
+        bundled: true,
+        file_sha256s: &[(
+            "silero_vad.onnx",
+            "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6",
+        )],
     },
     SpeechModel {
         id: SEGMENTATION_MODEL,
@@ -231,6 +349,11 @@ static MODELS: [SpeechModel; 10] = [
         summary: "Finds where each voice speaks.",
         license: "MIT",
         supports_prompt: false,
+        bundled: true,
+        file_sha256s: &[(
+            "model.onnx",
+            "220ad67ca923bef2fa91f2390c786097bf305bceb5e261d4af67b38e938e1079",
+        )],
     },
     SpeechModel {
         id: EMBEDDING_MODEL,
@@ -247,6 +370,11 @@ static MODELS: [SpeechModel; 10] = [
         summary: "Tells voices apart.",
         license: "Apache-2.0",
         supports_prompt: false,
+        bundled: true,
+        file_sha256s: &[(
+            "nemo_en_titanet_small.onnx",
+            "ad4a1802485d8b34c722d2a9d04249662f2ece5d28a7a039063ca22f515a789e",
+        )],
     },
     SpeechModel {
         id: KOKORO_MODEL,
@@ -270,6 +398,8 @@ static MODELS: [SpeechModel; 10] = [
         summary: "Reads summaries and answers aloud.",
         license: "Apache-2.0",
         supports_prompt: false,
+        bundled: false,
+        file_sha256s: &[],
     },
 ];
 
@@ -281,19 +411,27 @@ pub fn all() -> &'static [SpeechModel] {
 }
 
 pub fn transcription_models() -> &'static [SpeechModel] {
-    &MODELS[..6]
+    &MODELS[..9]
 }
 
 pub fn vad_model() -> &'static SpeechModel {
-    &MODELS[6]
+    &MODELS[9]
 }
 
 pub fn diarization_models() -> &'static [SpeechModel] {
-    &MODELS[7..9]
+    &MODELS[10..12]
 }
 
 pub fn kokoro_model() -> &'static SpeechModel {
-    &MODELS[9]
+    &MODELS[12]
+}
+
+pub fn multi_stt_default_ids() -> [&'static str; 3] {
+    [
+        WHISPER_TURBO_MODEL,
+        WHISPER_TURBO_TR_KHAN_MODEL,
+        ZIPFORMER_OAYK_MODEL,
+    ]
 }
 
 pub fn find(id: &str) -> Option<&'static SpeechModel> {
@@ -316,16 +454,86 @@ pub fn supporting_ids(diarize: bool) -> Vec<String> {
     ids
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SpeechModelPaths {
+    pub explicit_models_dir: Option<PathBuf>,
+    pub exe_dir: Option<PathBuf>,
+}
+
+impl SpeechModelPaths {
+    pub fn with_models_dir(dir: impl Into<PathBuf>) -> Self {
+        Self {
+            explicit_models_dir: Some(dir.into()),
+            exe_dir: None,
+        }
+    }
+}
+
+fn push_root_candidates(candidates: &mut Vec<(PathBuf, bool)>, root: &Path, model: &SpeechModel) {
+    candidates.push((root.join("models").join("speech").join(model.id), false));
+    candidates.push((root.join("speech").join(model.id), false));
+    candidates.push((root.join(model.id), false));
+}
+
+fn candidate_dirs(
+    paths: &LibraryPaths,
+    resolver: &SpeechModelPaths,
+    model: &SpeechModel,
+) -> Vec<(PathBuf, bool)> {
+    let mut candidates = Vec::new();
+    if let Some(explicit) = &resolver.explicit_models_dir {
+        push_root_candidates(&mut candidates, explicit, model);
+    }
+    if let Some(env_dir) = std::env::var_os(MODELS_DIR_ENV) {
+        push_root_candidates(&mut candidates, Path::new(&env_dir), model);
+    }
+    candidates.push((paths.models_dir().join("speech").join(model.id), true));
+    if let Some(exe_dir) = &resolver.exe_dir {
+        candidates.push((exe_dir.join("models").join("speech").join(model.id), false));
+    } else if let Ok(current_exe) = std::env::current_exe()
+        && let Some(dir) = current_exe.parent()
+    {
+        candidates.push((dir.join("models").join("speech").join(model.id), false));
+    }
+    candidates
+}
+
+fn join_rel(dir: &Path, file: &str) -> PathBuf {
+    let mut path = dir.to_path_buf();
+    for part in file.split('/') {
+        path.push(part);
+    }
+    path
+}
+
 pub fn model_dir(paths: &LibraryPaths, model: &SpeechModel) -> PathBuf {
     paths.models_dir().join("speech").join(model.id)
 }
 
 pub fn model_file(paths: &LibraryPaths, model: &SpeechModel, file: &str) -> PathBuf {
-    let mut path = model_dir(paths, model);
-    for part in file.split('/') {
-        path.push(part);
+    join_rel(&model_dir(paths, model), file)
+}
+
+pub fn resolve_model_dir(
+    paths: &LibraryPaths,
+    resolver: &SpeechModelPaths,
+    model: &SpeechModel,
+) -> PathBuf {
+    for (dir, is_user_dir) in candidate_dirs(paths, resolver, model) {
+        if is_installed_in_dir(&dir, model, is_user_dir) {
+            return dir;
+        }
     }
-    path
+    model_dir(paths, model)
+}
+
+pub fn resolve_model_file(
+    paths: &LibraryPaths,
+    resolver: &SpeechModelPaths,
+    model: &SpeechModel,
+    file: &str,
+) -> PathBuf {
+    join_rel(&resolve_model_dir(paths, resolver, model), file)
 }
 
 pub fn is_archive(model: &SpeechModel) -> bool {
@@ -362,10 +570,12 @@ pub fn download_dest(paths: &LibraryPaths, model: &SpeechModel) -> PathBuf {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct Marker {
     id: String,
     sha256: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    files_sha256: BTreeMap<String, String>,
 }
 
 fn earlier_archives(model: &SpeechModel) -> &'static [&'static str] {
@@ -376,22 +586,152 @@ fn earlier_archives(model: &SpeechModel) -> &'static [&'static str] {
     }
 }
 
-pub fn is_installed(paths: &LibraryPaths, model: &SpeechModel) -> bool {
-    let dir = model_dir(paths, model);
-    let marker = std::fs::read(dir.join(MARKER))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice::<Marker>(&bytes).ok());
-    marker.is_some_and(|m| {
-        m.id == model.id
-            && (m.sha256 == model.archive.sha256
-                || earlier_archives(model).contains(&m.sha256.as_str()))
-    }) && files_present(paths, model)
+fn files_present_in_dir(dir: &Path, model: &SpeechModel) -> bool {
+    model.files.iter().all(|file| {
+        std::fs::metadata(join_rel(dir, file)).is_ok_and(|m| m.is_file() && m.len() > 0)
+    })
 }
 
-fn files_present(paths: &LibraryPaths, model: &SpeechModel) -> bool {
-    model.files.iter().all(|file| {
-        std::fs::metadata(model_file(paths, model, file)).is_ok_and(|m| m.is_file() && m.len() > 0)
-    })
+fn read_marker(dir: &Path) -> Option<Marker> {
+    std::fs::read(dir.join(MARKER))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Marker>(&bytes).ok())
+}
+
+fn is_installed_in_dir(dir: &Path, model: &SpeechModel, is_user_dir: bool) -> bool {
+    if !files_present_in_dir(dir, model) {
+        return false;
+    }
+    if let Some(marker) = read_marker(dir) {
+        if marker.id != model.id {
+            return false;
+        }
+        if is_user_dir {
+            return marker.sha256 == model.archive.sha256
+                || earlier_archives(model).contains(&marker.sha256.as_str())
+                || (model.bundled && !marker.files_sha256.is_empty());
+        }
+        return true;
+    }
+    !is_user_dir && model.bundled && !model.file_sha256s.is_empty()
+}
+
+pub fn is_installed(paths: &LibraryPaths, model: &SpeechModel) -> bool {
+    is_installed_with(paths, &SpeechModelPaths::default(), model)
+}
+
+pub fn is_installed_with(
+    paths: &LibraryPaths,
+    resolver: &SpeechModelPaths,
+    model: &SpeechModel,
+) -> bool {
+    candidate_dirs(paths, resolver, model)
+        .into_iter()
+        .any(|(dir, is_user_dir)| is_installed_in_dir(&dir, model, is_user_dir))
+}
+
+fn sha256_file(path: &Path) -> Result<String> {
+    let mut file =
+        std::fs::File::open(path).with_context(|| format!("could not open {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = file
+            .read(&mut buf)
+            .with_context(|| format!("could not read {}", path.display()))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+pub fn write_bundled_marker(dir: &Path, model: &SpeechModel) -> Result<()> {
+    std::fs::create_dir_all(dir).with_context(|| format!("could not create {}", dir.display()))?;
+    let mut files_sha256 = BTreeMap::new();
+    for &file in model.files {
+        let path = join_rel(dir, file);
+        let meta = std::fs::metadata(&path)
+            .with_context(|| format!("missing bundled file {}", path.display()))?;
+        if !meta.is_file() || meta.len() == 0 {
+            bail!("bundled file {} is empty", path.display());
+        }
+        files_sha256.insert(file.to_string(), sha256_file(&path)?);
+    }
+    let mut agg = Sha256::new();
+    for (name, digest) in &files_sha256 {
+        agg.update(format!("{name}:{digest}\n").as_bytes());
+    }
+    let marker = Marker {
+        id: model.id.to_string(),
+        sha256: hex::encode(agg.finalize()),
+        files_sha256,
+    };
+    std::fs::write(dir.join(MARKER), serde_json::to_vec_pretty(&marker)?)
+        .context("could not write bundled install marker")?;
+    Ok(())
+}
+
+pub fn verify_integrity(dir: &Path, model: &SpeechModel) -> Result<()> {
+    let marker_path = dir.join(MARKER);
+    let marker = if marker_path.exists() {
+        let bytes = std::fs::read(&marker_path)
+            .with_context(|| format!("could not read {}", marker_path.display()))?;
+        let parsed: Marker = serde_json::from_slice(&bytes)
+            .with_context(|| format!("invalid marker {}", marker_path.display()))?;
+        if parsed.id != model.id {
+            bail!(
+                "marker id mismatch in {}: expected {}, got {}",
+                marker_path.display(),
+                model.id,
+                parsed.id
+            );
+        }
+        Some(parsed)
+    } else {
+        None
+    };
+
+    for &file in model.files {
+        let path = join_rel(dir, file);
+        let meta = std::fs::metadata(&path)
+            .with_context(|| format!("missing model file {}", path.display()))?;
+        if !meta.is_file() || meta.len() == 0 {
+            bail!("model file {} is empty or missing", path.display());
+        }
+        let pinned = model
+            .file_sha256s
+            .iter()
+            .find(|(name, _)| *name == file)
+            .map(|(_, hash)| *hash);
+        let marker_hash = marker
+            .as_ref()
+            .and_then(|m| m.files_sha256.get(file).map(String::as_str));
+        if pinned.is_none() && marker_hash.is_none() {
+            continue;
+        }
+        let actual = sha256_file(&path)?;
+        if let Some(expected) = pinned
+            && actual != expected
+        {
+            bail!(
+                "SHA-256 mismatch for {} ({}): expected {expected}, got {actual}",
+                model.id,
+                file
+            );
+        }
+        if let Some(expected) = marker_hash
+            && actual != expected
+        {
+            bail!(
+                "SHA-256 mismatch against marker for {} ({}): expected {expected}, got {actual}",
+                model.id,
+                file
+            );
+        }
+    }
+    Ok(())
 }
 
 pub fn finish_install(paths: &LibraryPaths, model: &SpeechModel) -> Result<()> {
@@ -426,6 +766,7 @@ pub fn finish_install(paths: &LibraryPaths, model: &SpeechModel) -> Result<()> {
     let marker = Marker {
         id: model.id.to_string(),
         sha256: model.archive.sha256.to_string(),
+        files_sha256: BTreeMap::new(),
     };
     std::fs::write(dir.join(MARKER), serde_json::to_vec_pretty(&marker)?)
         .context("could not write the install marker")?;
@@ -471,28 +812,38 @@ mod tests {
     #[test]
     fn catalog_is_consistent() {
         let mut ids = std::collections::HashSet::new();
+        assert_eq!(all().len(), 13);
         for model in all() {
             assert!(ids.insert(model.id), "duplicate id {}", model.id);
-            assert!(model.archive.url.starts_with(RELEASES), "{}", model.id);
             assert_eq!(model.archive.sha256.len(), 64, "{}", model.id);
             assert!(model.archive.size > 0);
             assert!(!model.files.is_empty());
-            if let Some(root) = model.archive.archive_root {
-                assert!(
-                    model.archive.url.ends_with(&format!("/{root}.tar.bz2")),
-                    "{}",
-                    model.id
-                );
+            if model.is_downloadable() {
+                assert!(model.archive.url.starts_with(RELEASES), "{}", model.id);
+                if let Some(root) = model.archive.archive_root {
+                    assert!(
+                        model.archive.url.ends_with(&format!("/{root}.tar.bz2")),
+                        "{}",
+                        model.id
+                    );
+                } else {
+                    assert!(model.archive.url.ends_with(model.files[0]), "{}", model.id);
+                }
             } else {
-                assert!(model.archive.url.ends_with(model.files[0]), "{}", model.id);
+                assert!(model.bundled, "{}", model.id);
+                assert!(!model.file_sha256s.is_empty(), "{}", model.id);
             }
         }
+        assert_eq!(transcription_models().len(), 9);
         assert!(
             transcription_models()
                 .iter()
                 .all(SpeechModel::is_transcription)
         );
+        assert_eq!(vad_model().id, VAD_MODEL);
         assert_eq!(vad_model().kind, ModelKind::VoiceActivity);
+        assert_eq!(diarization_models().len(), 2);
+        assert_eq!(kokoro_model().id, KOKORO_MODEL);
         assert_eq!(kokoro_model().kind, ModelKind::SpeechSynthesis);
         assert_eq!(
             find(DEFAULT_TRANSCRIPTION_MODEL).unwrap().display_name,
@@ -500,6 +851,67 @@ mod tests {
         );
         assert_eq!(supporting_ids(false), vec!["silero-vad"]);
         assert_eq!(supporting_ids(true).len(), 3);
+    }
+
+    #[test]
+    fn multi_stt_catalog_registers_bundled_models() {
+        let turbo = find(WHISPER_TURBO_MODEL).unwrap();
+        let khan = find(WHISPER_TURBO_TR_KHAN_MODEL).unwrap();
+        let zip = find(ZIPFORMER_OAYK_MODEL).unwrap();
+        assert_eq!(turbo.license, "MIT");
+        assert_eq!(khan.license, "MIT");
+        assert_eq!(zip.license, "Apache-2.0");
+        assert!(turbo.supports_language("tr"));
+        assert!(khan.supports_language("tr"));
+        assert!(zip.supports_language("tr"));
+        assert_eq!(
+            supporting_ids(true),
+            vec![
+                "silero-vad",
+                "pyannote-segmentation-3.0",
+                "speaker-titanet-small"
+            ]
+        );
+    }
+
+    #[test]
+    fn bundled_discovery_and_sha256_verification_rejects_tamper() {
+        let user_root = tempfile::tempdir().unwrap();
+        let paths = LibraryPaths::new(user_root.path());
+        let bundle_root = tempfile::tempdir().unwrap();
+        let model = find(ZIPFORMER_OAYK_MODEL).unwrap();
+        let model_dir = bundle_root
+            .path()
+            .join("models")
+            .join("speech")
+            .join(model.id);
+        std::fs::create_dir_all(&model_dir).unwrap();
+        for &file in model.files {
+            std::fs::write(model_dir.join(file), b"dummy-weights").unwrap();
+        }
+        write_bundled_marker(&model_dir, model).unwrap();
+
+        let resolver = SpeechModelPaths::with_models_dir(bundle_root.path());
+        assert!(is_installed_with(&paths, &resolver, model));
+        assert_eq!(resolve_model_dir(&paths, &resolver, model), model_dir);
+        let err = verify_integrity(&model_dir, model).unwrap_err();
+        assert!(err.to_string().contains("SHA-256 mismatch"));
+
+        let unpinned = SpeechModel {
+            file_sha256s: &[],
+            ..*model
+        };
+        verify_integrity(&model_dir, &unpinned).unwrap();
+
+        let mut marker: Marker =
+            serde_json::from_slice(&std::fs::read(model_dir.join(MARKER)).unwrap()).unwrap();
+        marker.id = "wrong".into();
+        std::fs::write(
+            model_dir.join(MARKER),
+            serde_json::to_vec(&marker).unwrap(),
+        )
+        .unwrap();
+        assert!(verify_integrity(&model_dir, model).is_err());
     }
 
     fn installed_from(paths: &LibraryPaths, model: &SpeechModel, sha256: &str) {
@@ -511,6 +923,7 @@ mod tests {
         let marker = Marker {
             id: model.id.to_string(),
             sha256: sha256.to_string(),
+            files_sha256: BTreeMap::new(),
         };
         std::fs::write(
             model_dir(paths, model).join(MARKER),

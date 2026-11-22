@@ -4808,6 +4808,8 @@ name = "lokalbot-speech"
 version = "0.14.2"
 dependencies = [
  "anyhow",
+ "hex",
+ "libc",
  "log",
  "lokalbot-audio",
  "lokalbot-core",
@@ -4815,10 +4817,13 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "sherpa-onnx",
  "tempfile",
  "thiserror 2.0.21",
  "unicode-normalization",
+ "ureq 3.5.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -50,7 +50,7 @@ impl UkrainianSupport {
             return Self::ServerDependent;
         }
         match models::find(model_id).and_then(|model| model.family()) {
-            Some(Family::Whisper) => Self::LanguageToken,
+            Some(Family::Whisper | Family::WhisperGgml) => Self::LanguageToken,
             Some(Family::NemoTransducer)
                 if models::find(model_id).is_some_and(|m| m.supports_language("uk")) =>
             {
