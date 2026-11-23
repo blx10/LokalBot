@@ -364,10 +364,31 @@ pub fn correct_transcript(
     segments: &[MultiSttSegment],
     on_start: &mut dyn FnMut(),
 ) -> Result<(Transcript, bool)> {
-    correct_transcript_with_keyring(
+    correct_transcript_with_runtime(
         meeting,
         library,
         settings,
+        None,
+        transcript,
+        segments,
+        on_start,
+    )
+}
+
+pub fn correct_transcript_with_runtime(
+    meeting: &Meeting,
+    library: &Library,
+    settings: &Settings,
+    runtime: Option<&lokalbot_ai::RuntimeManager>,
+    transcript: Transcript,
+    segments: &[MultiSttSegment],
+    on_start: &mut dyn FnMut(),
+) -> Result<(Transcript, bool)> {
+    correct_transcript_with_keyring_and_runtime(
+        meeting,
+        library,
+        settings,
+        runtime,
         transcript,
         segments,
         crate::secrets::openai_api_key(),
@@ -375,10 +396,34 @@ pub fn correct_transcript(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn correct_transcript_with_keyring(
     meeting: &Meeting,
     library: &Library,
     settings: &Settings,
+    transcript: Transcript,
+    segments: &[MultiSttSegment],
+    keyring_fallback: Option<String>,
+    on_start: &mut dyn FnMut(),
+) -> Result<(Transcript, bool)> {
+    correct_transcript_with_keyring_and_runtime(
+        meeting,
+        library,
+        settings,
+        None,
+        transcript,
+        segments,
+        keyring_fallback,
+        on_start,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn correct_transcript_with_keyring_and_runtime(
+    meeting: &Meeting,
+    library: &Library,
+    settings: &Settings,
+    runtime: Option<&lokalbot_ai::RuntimeManager>,
     mut transcript: Transcript,
     segments: &[MultiSttSegment],
     keyring_fallback: Option<String>,
@@ -396,10 +441,14 @@ pub(crate) fn correct_transcript_with_keyring(
     }
 
     let vocab = vocabulary_terms(meeting, library, settings);
-    let corrector = PostCorrector::new(config, settings.approved_remote_inference_origins.clone())?
-        .with_vocabulary(vocab)
-        .with_openrouter_data_policy(settings.open_router_data_policy)
-        .with_keyring_fallback(keyring_fallback);
+    let mut corrector =
+        PostCorrector::new(config, settings.approved_remote_inference_origins.clone())?
+            .with_vocabulary(vocab)
+            .with_openrouter_data_policy(settings.open_router_data_policy)
+            .with_keyring_fallback(keyring_fallback);
+    if let Some(rt) = runtime {
+        corrector = corrector.with_local_runtime(rt.clone(), settings.think_reasoning_level);
+    }
     let output: PostCorrectionOutput = corrector.correct(segments)?;
     output.apply_to_transcript(&mut transcript)?;
 

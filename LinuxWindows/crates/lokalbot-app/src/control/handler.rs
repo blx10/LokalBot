@@ -79,6 +79,7 @@ fn preset_token(preset: Preset) -> &'static str {
     match preset {
         Preset::Balanced => "recommended",
         Preset::Lightweight => "lightweight",
+        Preset::AsymmetricMultiStt => "asymmetric_multi_stt",
     }
 }
 
@@ -86,6 +87,7 @@ fn preset_named(value: Option<&Value>) -> Result<Preset, ControlError> {
     match value.and_then(Value::as_str) {
         Some("recommended") => Ok(Preset::Balanced),
         Some("lightweight") => Ok(Preset::Lightweight),
+        Some("asymmetric_multi_stt") => Ok(Preset::AsymmetricMultiStt),
         _ => Err(ControlError::invalid_request(format!(
             "Choose a model preset: {}.",
             MODEL_PRESETS.join(", ")

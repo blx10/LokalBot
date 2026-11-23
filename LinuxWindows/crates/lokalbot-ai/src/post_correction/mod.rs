@@ -12,7 +12,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use lokalbot_core::settings::OpenRouterDataPolicy;
+use lokalbot_core::settings::{OpenRouterDataPolicy, ReasoningLevel, SummarizerBackend};
 
 use crate::error::{AiError, ai_error};
 use crate::http;
@@ -199,6 +199,21 @@ pub(crate) struct CompletionCall {
     pub response_format_fallback: bool,
 }
 
+pub fn is_local_catalog_model(model: &str) -> bool {
+    let trimmed = model.trim();
+    !trimmed.is_empty()
+        && crate::catalog::entry(trimmed)
+            .is_some_and(|entry| entry.kind == crate::catalog::ModelKind::Text)
+}
+
+pub fn requires_remote_endpoint(config: &PostCorrectionConfig) -> bool {
+    !is_local_catalog_model(&config.primary_judge_model)
+        || config
+            .support_critic_models
+            .iter()
+            .any(|m| !m.trim().is_empty() && !is_local_catalog_model(m))
+}
+
 pub struct PostCorrector {
     pub(crate) config: PostCorrectionConfig,
     base_url: String,
@@ -206,18 +221,22 @@ pub struct PostCorrector {
     pub(crate) vocabulary: Vec<String>,
     data_policy: OpenRouterDataPolicy,
     schema_unsupported: Mutex<HashSet<String>>,
+    runtime: Option<crate::runtime::RuntimeManager>,
+    reasoning_level: ReasoningLevel,
 }
 
 impl PostCorrector {
     pub fn new(config: PostCorrectionConfig, approved_origins: Vec<String>) -> Result<Self> {
-        let base_url = trimmed_base(&config.base_url);
-        if base_url.is_empty() {
-            return Err(AiError::Unavailable("Post-correction base_url is empty.".into()).into());
-        }
         if config.primary_judge_model.trim().is_empty() {
             return Err(AiError::NoModel.into());
         }
-        consent(&base_url, &approved_origins)?;
+        let base_url = trimmed_base(&config.base_url);
+        if requires_remote_endpoint(&config) {
+            if base_url.is_empty() {
+                return Err(AiError::Unavailable("Post-correction base_url is empty.".into()).into());
+            }
+            consent(&base_url, &approved_origins)?;
+        }
         let resolved_api_key = resolve_api_key(Some(&config.api_key), None);
         Ok(Self {
             config,
@@ -226,7 +245,19 @@ impl PostCorrector {
             vocabulary: Vec::new(),
             data_policy: OpenRouterDataPolicy::PrivateOnly,
             schema_unsupported: Mutex::new(HashSet::new()),
+            runtime: None,
+            reasoning_level: ReasoningLevel::Automatic,
         })
+    }
+
+    pub fn with_local_runtime(
+        mut self,
+        runtime: crate::runtime::RuntimeManager,
+        level: ReasoningLevel,
+    ) -> Self {
+        self.runtime = Some(runtime);
+        self.reasoning_level = level;
+        self
     }
 
     pub fn with_vocabulary(mut self, terms: Vec<String>) -> Self {
@@ -258,6 +289,25 @@ impl PostCorrector {
         model: &str,
         request: &ChatRequest,
     ) -> Result<CompletionCall> {
+        if is_local_catalog_model(model) {
+            let runtime = self.runtime.as_ref().ok_or_else(|| {
+                AiError::Unavailable(
+                    "Local model runtime is not available for post-correction.".into(),
+                )
+            })?;
+            let local_settings = lokalbot_core::Settings {
+                summarizer_backend: SummarizerBackend::BuiltIn,
+                built_in_model_id: model.trim().to_string(),
+                think_reasoning_level: self.reasoning_level,
+                ..Default::default()
+            };
+            let client = crate::think::ThinkClient::new(runtime, &local_settings)?;
+            let text = client.complete(request)?;
+            return Ok(CompletionCall {
+                text,
+                response_format_fallback: false,
+            });
+        }
         let timeout = self.config.effective_timeout();
         let started = Instant::now();
         let dialect = Dialect::inferred(&self.base_url);
@@ -1075,5 +1125,25 @@ mod tests {
             "unexpected error: {err_str}"
         );
         assert!(!err_str.contains("sk-test-secret-key-987"));
+    }
+
+    #[test]
+    fn local_catalog_models_do_not_require_remote_endpoint() {
+        assert!(is_local_catalog_model("qwen3.5-4b"));
+        assert!(!is_local_catalog_model("Qwen3.8-27B"));
+        let mut cfg = PostCorrectionConfig {
+            enabled: true,
+            base_url: String::new(),
+            api_key: String::new(),
+            primary_judge_model: "qwen3.5-4b".into(),
+            support_critic_models: vec!["qwen3.5-4b".into()],
+            ..Default::default()
+        };
+        assert!(!requires_remote_endpoint(&cfg));
+        assert!(PostCorrector::new(cfg.clone(), Vec::new()).is_ok());
+
+        cfg.support_critic_models.push("gpt-oss-120b".into());
+        assert!(requires_remote_endpoint(&cfg));
+        assert!(PostCorrector::new(cfg, Vec::new()).is_err());
     }
 }

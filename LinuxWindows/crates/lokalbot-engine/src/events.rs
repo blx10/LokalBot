@@ -50,6 +50,7 @@ pub enum Command {
     CheckModels(Vec<ModelRole>),
     CancelModelChecks,
     CheckConnection(lokalbot_core::settings::SummarizerBackend),
+    CheckPostCorrectionConnection,
     Companion(crate::companion::CompanionCommand),
     PrepareMeeting {
         event: Box<lokalbot_core::calendar::CalendarEvent>,
@@ -183,6 +184,7 @@ pub enum EngineEvent {
     Speech(SpeechStatus),
     ModelChecks(ModelCheckStatus),
     ConnectionCheck(ConnectionCheck),
+    PostCorrectionConnectionCheck(ConnectionCheck),
     Companion(Box<crate::companion::CompanionSnapshot>),
 }
 

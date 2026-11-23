@@ -297,6 +297,70 @@ impl SettingsPage {
         }
         column.into_any_element()
     }
+
+    pub(super) fn post_correction_connection_check_row(
+        &self,
+        has_changes: bool,
+        cx: &App,
+    ) -> AnyElement {
+        let (settings, check) = {
+            let data = self.data.read(cx);
+            (
+                data.settings.clone(),
+                data.post_correction_connection_check.clone(),
+            )
+        };
+        let running = check.running;
+        let is_local = lokalbot_ai::post_correction::is_local_catalog_model(
+            &settings.post_correction_primary_judge_model,
+        );
+        let mut column = v_flex()
+            .gap(px(8.))
+            .child(
+                h_flex().child(
+                    Button::new("settings-check-post-correction-connection")
+                        .outline()
+                        .small()
+                        .label(if running {
+                            lokalbot_i18n::tr("Checking…")
+                        } else {
+                            lokalbot_i18n::tr("Check connection")
+                        })
+                        .disabled(running || has_changes)
+                        .on_click(move |_, _, cx| {
+                            crate::bridge::send(Command::CheckPostCorrectionConnection, cx)
+                        }),
+                ),
+            )
+            .child(settings_row::help(
+                if has_changes {
+                    lokalbot_i18n::tr("Save changes before checking this connection.")
+                } else if is_local {
+                    lokalbot_i18n::tr("Connection checks run a short sample prompt on this PC using the selected judge model.")
+                } else {
+                    lokalbot_i18n::tr("Connection checks send a short sample prompt to this server. No meeting or screen content is used.")
+                },
+                cx,
+            ));
+        if !has_changes {
+            if let Some(reply) = &check.reply {
+                column = column.child(settings_row::help(
+                    lokalbot_i18n::format("Connection check passed · {0}", &[("0", reply.clone())]),
+                    cx,
+                ));
+            }
+            if let Some(error) = &check.error {
+                let failure = GenerationFailure::new(
+                    error,
+                    Some(settings.post_correction_base_url.as_str()),
+                    Some(settings.post_correction_primary_judge_model.as_str()),
+                    settings.open_router_data_policy,
+                );
+                column = column.child(failure_details(&failure, cx));
+            }
+        }
+        column.into_any_element()
+    }
 }
 
 fn failure_details(failure: &GenerationFailure, cx: &App) -> gpui_kit::Div {

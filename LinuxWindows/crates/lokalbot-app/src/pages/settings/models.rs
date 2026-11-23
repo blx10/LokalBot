@@ -79,10 +79,42 @@ pub fn model_bytes(id: &str, settings: &Settings) -> u64 {
 
 pub fn models_in_use(settings: &Settings) -> Vec<String> {
     let mut ids = speech_needs(settings);
+    if settings.transcription_mode
+        == lokalbot_core::config_profile::TranscriptionMode::AsymmetricMultiStt
+    {
+        for slot_id in [
+            &settings.transcription_models.primary.id,
+            &settings.transcription_models.tr_backup.id,
+            &settings.transcription_models.fast_helper.id,
+        ] {
+            if !slot_id.trim().is_empty() && !ids.contains(slot_id) {
+                ids.push(slot_id.clone());
+            }
+        }
+    }
     let built_in = settings.summarizer_backend == SummarizerBackend::BuiltIn
         && !settings.disable_local_llama_server;
     if built_in {
         ids.push(settings.built_in_model_id.clone());
+    }
+    let mut post_correction_local = false;
+    if settings.post_correction_enabled {
+        let judge = settings.post_correction_primary_judge_model.trim();
+        if lokalbot_ai::post_correction::is_local_catalog_model(judge) {
+            post_correction_local = true;
+            if !ids.iter().any(|id| id == judge) {
+                ids.push(judge.to_string());
+            }
+        }
+        for critic in &settings.post_correction_support_critic_models {
+            let trimmed = critic.trim();
+            if lokalbot_ai::post_correction::is_local_catalog_model(trimmed) {
+                post_correction_local = true;
+                if !ids.iter().any(|id| id == trimmed) {
+                    ids.push(trimmed.to_string());
+                }
+            }
+        }
     }
     if settings.semantic_search_enabled {
         ids.push(lokalbot_ai::catalog::EMBEDDING_MODEL_ID.to_string());
@@ -92,7 +124,8 @@ pub fn models_in_use(settings: &Settings) -> Vec<String> {
     if autocomplete_on_device {
         ids.push(settings.cotyping_built_in_model_id.clone());
     }
-    if built_in || settings.semantic_search_enabled || autocomplete_on_device {
+    if built_in || post_correction_local || settings.semantic_search_enabled || autocomplete_on_device
+    {
         ids.push(RUNTIME_ID.to_string());
     }
     if settings.screen_context_capture_mode != lokalbot_core::ScreenContextMode::ActivityOnly {
@@ -186,15 +219,21 @@ pub fn size_label(bytes: u64) -> String {
 pub enum Preset {
     Balanced,
     Lightweight,
+    AsymmetricMultiStt,
 }
 
 impl Preset {
-    pub const ALL: [Preset; 2] = [Preset::Balanced, Preset::Lightweight];
+    pub const ALL: [Preset; 3] = [
+        Preset::Balanced,
+        Preset::Lightweight,
+        Preset::AsymmetricMultiStt,
+    ];
 
     pub fn title(self) -> &'static str {
         match self {
             Preset::Balanced => lokalbot_ai::catalog::PRESETS[0].name,
             Preset::Lightweight => lokalbot_ai::catalog::PRESETS[1].name,
+            Preset::AsymmetricMultiStt => "Asymmetric Multi-STT",
         }
     }
 
@@ -202,21 +241,44 @@ impl Preset {
         match self {
             Preset::Balanced => lokalbot_ai::catalog::PRESETS[0].description,
             Preset::Lightweight => lokalbot_ai::catalog::PRESETS[1].description,
+            Preset::AsymmetricMultiStt => {
+                "Runs 3 speech models sequentially with Whisper large-v3 turbo as primary."
+            }
         }
     }
 
     pub fn models(self) -> (&'static str, &'static str) {
         let index = match self {
-            Preset::Balanced => 0,
+            Preset::Balanced | Preset::AsymmetricMultiStt => 0,
             Preset::Lightweight => 1,
         };
-        (
-            DEFAULT_SPEECH_MODEL,
-            lokalbot_ai::catalog::PRESETS[index].think,
-        )
+        let speech = match self {
+            Preset::AsymmetricMultiStt => lokalbot_speech::models::WHISPER_TURBO_MODEL,
+            Preset::Balanced | Preset::Lightweight => DEFAULT_SPEECH_MODEL,
+        };
+        (speech, lokalbot_ai::catalog::PRESETS[index].think)
     }
 
     pub fn summary(self) -> String {
+        if self == Preset::AsymmetricMultiStt {
+            return lokalbot_i18n::format(
+                "Transcribe: {0}, Backup: {1}, Helper: {2}",
+                &[
+                    (
+                        "0",
+                        model_name(lokalbot_speech::models::WHISPER_TURBO_MODEL),
+                    ),
+                    (
+                        "1",
+                        model_name(lokalbot_speech::models::WHISPER_TURBO_TR_KHAN_MODEL),
+                    ),
+                    (
+                        "2",
+                        model_name(lokalbot_speech::models::ZIPFORMER_OAYK_MODEL),
+                    ),
+                ],
+            );
+        }
         let (speech, think) = self.models();
         lokalbot_i18n::format(
             "Transcribe: {0}, Think: {1}",
@@ -228,16 +290,41 @@ impl Preset {
     }
 
     pub fn matches(self, settings: &Settings) -> bool {
+        if self == Preset::AsymmetricMultiStt {
+            return settings.transcription_mode
+                == lokalbot_core::config_profile::TranscriptionMode::AsymmetricMultiStt;
+        }
         let (speech, think) = self.models();
-        settings.summarizer_backend == SummarizerBackend::BuiltIn
+        settings.transcription_mode
+            == lokalbot_core::config_profile::TranscriptionMode::Single
+            && settings.summarizer_backend == SummarizerBackend::BuiltIn
             && settings.transcription_model == speech
             && settings.built_in_model_id == think
     }
 
     pub(crate) fn patch(self) -> ModelPatch {
+        if self == Preset::AsymmetricMultiStt {
+            return ModelPatch {
+                transcription: Some(lokalbot_speech::models::WHISPER_TURBO_MODEL.to_string()),
+                transcription_mode: Some(
+                    lokalbot_core::config_profile::TranscriptionMode::AsymmetricMultiStt,
+                ),
+                transcription_primary_model: Some(
+                    lokalbot_speech::models::WHISPER_TURBO_MODEL.to_string(),
+                ),
+                transcription_backup_model: Some(
+                    lokalbot_speech::models::WHISPER_TURBO_TR_KHAN_MODEL.to_string(),
+                ),
+                transcription_fast_helper_model: Some(
+                    lokalbot_speech::models::ZIPFORMER_OAYK_MODEL.to_string(),
+                ),
+                ..Default::default()
+            };
+        }
         let (speech, think) = self.models();
         ModelPatch {
             transcription: Some(speech.to_string()),
+            transcription_mode: Some(lokalbot_core::config_profile::TranscriptionMode::Single),
             backend: Some(SummarizerBackend::BuiltIn),
             assistant_model_id: Some(think.to_string()),
             ..Default::default()
@@ -633,6 +720,34 @@ impl ModelsState {
             | SummarizerBackend::GeminiPlan => false,
         }
     }
+
+    pub(super) fn has_post_correction_changes(&self, settings: &Settings, cx: &App) -> bool {
+        let url = self
+            .post_correction_url
+            .read(cx)
+            .value()
+            .trim()
+            .to_string();
+        let judge = self
+            .post_correction_judge
+            .read(cx)
+            .value()
+            .trim()
+            .to_string();
+        let critics: Vec<String> = self
+            .post_correction_critics
+            .read(cx)
+            .value()
+            .split(',')
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+            .map(str::to_string)
+            .collect();
+        url != settings.post_correction_base_url.trim()
+            || (!judge.is_empty() && judge != settings.post_correction_primary_judge_model.trim())
+            || critics != settings.post_correction_support_critic_models
+            || self.post_correction_key_dirty
+    }
 }
 
 pub(crate) fn resolve_masked_api_key_edit(stored: &str, input_value: &str, dirty: bool) -> String {
@@ -688,6 +803,9 @@ impl SettingsPage {
             Role::Transcribe => lokalbot_speech::models::transcription_models()
                 .iter()
                 .map(|m| {
+                    let primary = (settings.transcription_mode
+                        == lokalbot_core::config_profile::TranscriptionMode::AsymmetricMultiStt)
+                        .then(|| m.id.to_string());
                     (
                         SharedString::from(format!(
                             "{} · {}",
@@ -697,6 +815,7 @@ impl SettingsPage {
                         settings.transcription_model == m.id,
                         ModelPatch {
                             transcription: Some(m.id.to_string()),
+                            transcription_primary_model: primary,
                             ..Default::default()
                         },
                         m.display_name.to_string(),
@@ -846,6 +965,68 @@ impl SettingsPage {
                                         cx.notify();
                                     }
                                     ChangeLink::Reveal(id) => page.reveal(id, window, cx),
+                                });
+                            }),
+                    );
+                }
+                menu
+            })
+            .into_any_element()
+    }
+
+    pub(super) fn speech_slot_change_button(
+        &self,
+        id: &'static str,
+        current_model: &str,
+        make_patch: fn(String) -> ModelPatch,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let page = cx.entity();
+        let options: Vec<(SharedString, bool, ModelPatch, String)> =
+            lokalbot_speech::models::transcription_models()
+                .iter()
+                .map(|m| {
+                    (
+                        SharedString::from(format!(
+                            "{} · {}",
+                            m.display_name,
+                            size_label(m.archive.size)
+                        )),
+                        current_model == m.id,
+                        make_patch(m.id.to_string()),
+                        m.display_name.to_string(),
+                    )
+                })
+                .collect();
+        let options = std::rc::Rc::new(options);
+        Button::new(id)
+            .outline()
+            .small()
+            .label(lokalbot_i18n::tr("Change…"))
+            .disabled(self.models.setup.is_switching())
+            .dropdown_menu(move |mut menu, _, _| {
+                menu = menu.scrollable(options.len() > 12);
+                for (label, checked, patch, title) in options.iter() {
+                    let page = page.clone();
+                    let patch = patch.clone();
+                    let title = title.clone();
+                    let already = *checked;
+                    menu = menu.item(
+                        PopupMenuItem::new(label.clone())
+                            .checked(*checked)
+                            .on_click(move |_, _, cx| {
+                                if already {
+                                    return;
+                                }
+                                page.update(cx, |page, cx| {
+                                    let data = page.data.clone();
+                                    page.models.setup.apply(
+                                        patch.clone(),
+                                        title.clone(),
+                                        &data,
+                                        cx,
+                                    );
+                                    cx.notify();
                                 });
                             }),
                     );
@@ -1621,7 +1802,6 @@ impl SettingsPage {
     }
 
     pub(super) fn post_correction_page(&self, cx: &mut Context<Self>) -> Vec<Section> {
-        let lb = cx.lb().clone();
         let settings = self.data.read(cx).settings.clone();
         let page = cx.entity();
         let bar = Section::bare(super::subpage::bar(
@@ -1636,6 +1816,24 @@ impl SettingsPage {
             },
             cx,
         ));
+        let form = self.post_correction_form(&settings, cx);
+        vec![
+            bar,
+            self.approvals_section(cx),
+            Section::new(None).row(
+                "settings.postCorrection",
+                settings_row::content_row(
+                    "settings.postCorrection",
+                    form.py(px(4.)),
+                    self.is_focused("settings.postCorrection"),
+                    cx,
+                ),
+            ),
+        ]
+    }
+
+    pub(super) fn post_correction_form(&self, settings: &Settings, cx: &mut Context<Self>) -> Div {
+        let lb = cx.lb().clone();
         let data = self.data.clone();
         let draft_url = self
             .models
@@ -1644,6 +1842,28 @@ impl SettingsPage {
             .value()
             .trim()
             .to_string();
+        let draft_judge = self
+            .models
+            .post_correction_judge
+            .read(cx)
+            .value()
+            .trim()
+            .to_string();
+        let draft_critics: Vec<String> = self
+            .models
+            .post_correction_critics
+            .read(cx)
+            .value()
+            .split(',')
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+            .map(str::to_string)
+            .collect();
+        let needs_remote = !lokalbot_ai::post_correction::is_local_catalog_model(&draft_judge)
+            || draft_critics
+                .iter()
+                .any(|m| !lokalbot_ai::post_correction::is_local_catalog_model(m));
+        let has_pc_changes = self.models.has_post_correction_changes(settings, cx);
         let pc_key_field = if self.models.post_correction_key_dirty {
             Input::new(&self.models.post_correction_key).mask_toggle()
         } else {
@@ -1659,6 +1879,83 @@ impl SettingsPage {
                 .child(div().text_size(ty::BODY).text_color(lb.text).child(label))
                 .child(Input::new(input))
         };
+        let judge_input = self.models.post_correction_judge.clone();
+        let judge_page = cx.entity();
+        let judge_current = draft_judge.clone();
+        let judge_local_picker = Button::new("settings-pc-judge-local")
+            .outline()
+            .small()
+            .label(lokalbot_i18n::tr("Local models…"))
+            .dropdown_caret(true)
+            .dropdown_menu(move |mut menu, _, _| {
+                let entries: Vec<_> = lokalbot_ai::catalog::think_entries().collect();
+                menu = menu.scrollable(entries.len() > 12);
+                for entry in entries {
+                    let input = judge_input.clone();
+                    let page = judge_page.clone();
+                    let id = entry.id.to_string();
+                    let label = format!("{} · {}", entry.display_name, size_label(entry.size_bytes));
+                    menu = menu.item(
+                        PopupMenuItem::new(label)
+                            .checked(judge_current == entry.id)
+                            .on_click(move |_, window, cx| {
+                                input.update(cx, |field, cx| {
+                                    field.set_value(id.clone(), window, cx);
+                                });
+                                page.update(cx, |page, cx| {
+                                    page.models.post_correction_saved = None;
+                                    cx.notify();
+                                });
+                            }),
+                    );
+                }
+                menu
+            });
+        let critics_input = self.models.post_correction_critics.clone();
+        let critics_page = cx.entity();
+        let critics_current = draft_critics.clone();
+        let critics_local_picker = Button::new("settings-pc-critics-local")
+            .outline()
+            .small()
+            .label(lokalbot_i18n::tr("Local models…"))
+            .dropdown_caret(true)
+            .dropdown_menu(move |mut menu, _, _| {
+                let entries: Vec<_> = lokalbot_ai::catalog::think_entries().collect();
+                menu = menu.scrollable(entries.len() > 12);
+                for entry in entries {
+                    let input = critics_input.clone();
+                    let page = critics_page.clone();
+                    let id = entry.id.to_string();
+                    let checked = critics_current.iter().any(|m| m == entry.id);
+                    let label = format!("{} · {}", entry.display_name, size_label(entry.size_bytes));
+                    menu = menu.item(
+                        PopupMenuItem::new(label)
+                            .checked(checked)
+                            .on_click(move |_, window, cx| {
+                                input.update(cx, |field, cx| {
+                                    let mut items: Vec<String> = field
+                                        .value()
+                                        .split(',')
+                                        .map(str::trim)
+                                        .filter(|m| !m.is_empty())
+                                        .map(str::to_string)
+                                        .collect();
+                                    if items.iter().any(|m| m == &id) {
+                                        items.retain(|m| m != &id);
+                                    } else {
+                                        items.push(id.clone());
+                                    }
+                                    field.set_value(items.join(", "), window, cx);
+                                });
+                                page.update(cx, |page, cx| {
+                                    page.models.post_correction_saved = None;
+                                    cx.notify();
+                                });
+                            }),
+                    );
+                }
+                menu
+            });
         let stepper = |id_prefix: &'static str,
                        label: &'static str,
                        value: usize,
@@ -1712,7 +2009,7 @@ impl SettingsPage {
         let enabled_data = self.data.clone();
         let critic_fail_data = self.data.clone();
         let save_page = cx.entity();
-        let form = v_flex()
+        let mut form = v_flex()
             .w_full()
             .gap(px(14.))
             .child(
@@ -1724,7 +2021,7 @@ impl SettingsPage {
                             lokalbot_i18n::tr("Enable LLM post-correction"),
                             Some(
                                 lokalbot_i18n::tr(
-                                    "Two-stage remote LLM repair after Multi-STT transcription",
+                                    "Two-stage LLM repair after Multi-STT transcription",
                                 )
                                 .into(),
                             ),
@@ -1795,16 +2092,48 @@ impl SettingsPage {
                             }),
                     ),
             )
-            .child(field(
-                lokalbot_i18n::tr("Judge model"),
-                &self.models.post_correction_judge,
-                cx,
-            ))
-            .child(field(
-                lokalbot_i18n::tr("Critic models (comma-separated)"),
-                &self.models.post_correction_critics,
-                cx,
-            ))
+            .child(
+                v_flex()
+                    .gap(px(5.))
+                    .child(
+                        div()
+                            .text_size(ty::BODY)
+                            .text_color(lb.text)
+                            .child(lokalbot_i18n::tr("Judge model")),
+                    )
+                    .child(
+                        h_flex()
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(Input::new(&self.models.post_correction_judge)),
+                            )
+                            .child(judge_local_picker),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .gap(px(5.))
+                    .child(
+                        div()
+                            .text_size(ty::BODY)
+                            .text_color(lb.text)
+                            .child(lokalbot_i18n::tr("Critic models (comma-separated)")),
+                    )
+                    .child(
+                        h_flex()
+                            .gap(px(8.))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(Input::new(&self.models.post_correction_critics)),
+                            )
+                            .child(critics_local_picker),
+                    ),
+            )
             .child(stepper(
                 "pc-segments",
                 lokalbot_i18n::tr("Segments per batch"),
@@ -1859,8 +2188,11 @@ impl SettingsPage {
                             });
                         },
                     )),
-            )
-            .child(self.endpoint_disclosure(&draft_url, cx))
+            );
+        if needs_remote || !draft_url.is_empty() {
+            form = form.child(self.endpoint_disclosure(&draft_url, cx));
+        }
+        form = form
             .child(
                 h_flex()
                     .gap(px(12.))
@@ -1882,20 +2214,9 @@ impl SettingsPage {
                                 .child(saved),
                         )
                     }),
-            );
-        vec![
-            bar,
-            self.approvals_section(cx),
-            Section::new(None).row(
-                "settings.postCorrection",
-                settings_row::content_row(
-                    "settings.postCorrection",
-                    form.py(px(4.)),
-                    self.is_focused("settings.postCorrection"),
-                    cx,
-                ),
-            ),
-        ]
+            )
+            .child(self.post_correction_connection_check_row(has_pc_changes, cx));
+        form
     }
 
     fn save_post_correction(&mut self, cx: &mut Context<Self>) {
@@ -2257,6 +2578,37 @@ mod tests {
         assert_eq!(size_label(2_740_937_888), "2.7 GB");
         assert_eq!(size_label(730_895_584), "731 MB");
         assert_eq!(model_name("qwen3.5-4b"), "Qwen3.5 4B");
+
+        Preset::AsymmetricMultiStt.patch().apply(&mut settings);
+        assert_eq!(
+            settings.transcription_mode,
+            lokalbot_core::config_profile::TranscriptionMode::AsymmetricMultiStt
+        );
+        assert_eq!(
+            settings.transcription_model,
+            lokalbot_speech::models::WHISPER_TURBO_MODEL
+        );
+        assert_eq!(
+            settings.transcription_models.primary.id,
+            lokalbot_speech::models::WHISPER_TURBO_MODEL
+        );
+        assert_eq!(
+            settings.transcription_models.tr_backup.id,
+            lokalbot_speech::models::WHISPER_TURBO_TR_KHAN_MODEL
+        );
+        assert_eq!(
+            settings.transcription_models.fast_helper.id,
+            lokalbot_speech::models::ZIPFORMER_OAYK_MODEL
+        );
+        assert!(Preset::AsymmetricMultiStt.matches(&settings));
+        assert!(!Preset::Balanced.matches(&settings));
+
+        Preset::Balanced.patch().apply(&mut settings);
+        assert_eq!(
+            settings.transcription_mode,
+            lokalbot_core::config_profile::TranscriptionMode::Single
+        );
+        assert!(Preset::Balanced.matches(&settings));
     }
 
     #[test]

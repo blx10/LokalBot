@@ -91,6 +91,26 @@ pub(crate) fn identity(role: ModelRole, settings: &Settings, api_key: &str) -> V
     }
 }
 
+fn post_correction_identity(settings: &Settings) -> Vec<String> {
+    let pc = crate::post_correction::post_correction_config(settings);
+    let (base_url, judge, api_key) = match pc {
+        Some(cfg) => (cfg.base_url, cfg.primary_judge_model, cfg.api_key),
+        None => (
+            settings.post_correction_base_url.clone(),
+            settings.post_correction_primary_judge_model.clone(),
+            settings.post_correction_api_key.clone(),
+        ),
+    };
+    vec![
+        base_url,
+        judge,
+        format!("{:?}", settings.open_router_data_policy),
+        remote_block_reason(&settings.post_correction_base_url, &settings.approved_remote_inference_origins)
+            .unwrap_or_default(),
+        hex::encode(Sha256::digest(api_key.as_bytes())),
+    ]
+}
+
 fn connection_identity(settings: &Settings, backend: SummarizerBackend) -> Vec<String> {
     let mut config = settings.clone();
     config.summarizer_backend = backend;
@@ -116,6 +136,7 @@ struct Inner {
     status: Mutex<ModelCheckStatus>,
     generation: AtomicU64,
     connection_generation: AtomicU64,
+    post_correction_connection_generation: AtomicU64,
 }
 
 impl ModelChecks {
@@ -127,6 +148,7 @@ impl ModelChecks {
                 status: Mutex::new(ModelCheckStatus::default()),
                 generation: AtomicU64::new(0),
                 connection_generation: AtomicU64::new(0),
+                post_correction_connection_generation: AtomicU64::new(0),
             }),
         }
     }
@@ -214,6 +236,48 @@ impl ModelChecks {
                 .emit(EngineEvent::ConnectionCheck(ConnectionCheck {
                     running: false,
                     backend: Some(backend),
+                    reply,
+                    error,
+                }));
+        });
+    }
+
+    pub fn check_post_correction_connection(&self) {
+        let inner = self.inner.clone();
+        let token = inner
+            .post_correction_connection_generation
+            .fetch_add(1, Ordering::Relaxed)
+            + 1;
+        inner
+            .shared
+            .emit(EngineEvent::PostCorrectionConnectionCheck(ConnectionCheck {
+                running: true,
+                backend: None,
+                ..Default::default()
+            }));
+        std::thread::spawn(move || {
+            let settings = inner.shared.settings();
+            let before = post_correction_identity(&settings);
+            let result = inner.ask_post_correction(&settings);
+            if inner
+                .post_correction_connection_generation
+                .load(Ordering::Relaxed)
+                != token
+            {
+                return;
+            }
+            let latest = inner.shared.settings();
+            let same = before == post_correction_identity(&latest);
+            let (reply, error) = match result {
+                _ if !same => (None, None),
+                Ok(reply) => (Some(reply.chars().take(120).collect()), None),
+                Err(error) => (None, Some(format!("{error:#}"))),
+            };
+            inner
+                .shared
+                .emit(EngineEvent::PostCorrectionConnectionCheck(ConnectionCheck {
+                    running: false,
+                    backend: None,
                     reply,
                     error,
                 }));
@@ -318,6 +382,53 @@ impl Inner {
                 "The model returned no words for the spoken sample. Check the selected language and try again."
             ))
         }
+    }
+
+    fn ask_post_correction(&self, settings: &Settings) -> Result<String> {
+        let judge = settings.post_correction_primary_judge_model.trim();
+        let judge = if judge.is_empty() {
+            lokalbot_ai::post_correction::PostCorrectionConfig::default().primary_judge_model
+        } else {
+            judge.to_string()
+        };
+        if lokalbot_ai::post_correction::is_local_catalog_model(&judge) {
+            let local_settings = Settings {
+                summarizer_backend: SummarizerBackend::BuiltIn,
+                built_in_model_id: judge,
+                think_reasoning_level: settings.think_reasoning_level,
+                ..Settings::default()
+            };
+            return self.ask_think(&local_settings);
+        }
+        let base_url = settings.post_correction_base_url.trim();
+        if base_url.is_empty() {
+            return Err(anyhow!("Post-correction server URL is empty."));
+        }
+        let api_key = lokalbot_ai::think::resolve_api_key(
+            Some(&settings.post_correction_api_key),
+            crate::secrets::openai_api_key(),
+        );
+        let client = lokalbot_ai::ThinkClient::openai_compatible(
+            base_url,
+            &judge,
+            api_key,
+            &settings.approved_remote_inference_origins,
+        )?
+        .with_openrouter_data_policy(settings.open_router_data_policy)
+        .with_priority(
+            lokalbot_ai::remote_gate::Priority::Interactive,
+            "post-correction connection check",
+        );
+        let reply = client.complete(&lokalbot_ai::ChatRequest::new(
+            lokalbot_ai::prompts::CONNECTIVITY_TEST_SYSTEM,
+            lokalbot_ai::prompts::CONNECTIVITY_TEST_PROMPT,
+        ))?;
+        if reply.trim().is_empty() {
+            return Err(anyhow!(
+                "The model returned an empty response. Try another check."
+            ));
+        }
+        Ok(reply)
     }
 
     fn ask_think(&self, config: &Settings) -> Result<String> {

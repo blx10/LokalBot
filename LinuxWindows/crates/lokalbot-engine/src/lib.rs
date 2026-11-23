@@ -671,6 +671,9 @@ fn dispatch(shared: Arc<Shared>, commands: Sender<Command>, receiver: Receiver<C
             Command::CheckModels(roles) => model_checks.run(roles),
             Command::CancelModelChecks => model_checks.cancel(),
             Command::CheckConnection(backend) => model_checks.check_connection(backend),
+            Command::CheckPostCorrectionConnection => {
+                model_checks.check_post_correction_connection()
+            }
             Command::Companion(command) => shared.companion.command(command, &shared.settings()),
             Command::Shutdown => break,
         }

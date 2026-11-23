@@ -21,6 +21,10 @@ use crate::ui::{self, Ico, settings_row};
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ModelPatch {
     pub transcription: Option<String>,
+    pub transcription_mode: Option<lokalbot_core::config_profile::TranscriptionMode>,
+    pub transcription_primary_model: Option<String>,
+    pub transcription_backup_model: Option<String>,
+    pub transcription_fast_helper_model: Option<String>,
     pub remote_transcription_base_url: Option<String>,
     pub remote_transcription_model: Option<String>,
     pub backend: Option<SummarizerBackend>,
@@ -30,8 +34,26 @@ pub struct ModelPatch {
 
 impl ModelPatch {
     pub fn apply(&self, settings: &mut Settings) {
+        if let Some(mode) = self.transcription_mode {
+            settings.transcription_mode = mode;
+        }
         if let Some(id) = &self.transcription {
             settings.transcription_model = id.clone();
+            if settings.transcription_mode
+                == lokalbot_core::config_profile::TranscriptionMode::AsymmetricMultiStt
+                && self.transcription_primary_model.is_none()
+            {
+                settings.transcription_models.primary.id = id.clone();
+            }
+        }
+        if let Some(id) = &self.transcription_primary_model {
+            settings.transcription_models.primary.id = id.clone();
+        }
+        if let Some(id) = &self.transcription_backup_model {
+            settings.transcription_models.tr_backup.id = id.clone();
+        }
+        if let Some(id) = &self.transcription_fast_helper_model {
+            settings.transcription_models.fast_helper.id = id.clone();
         }
         if let Some(url) = &self.remote_transcription_base_url {
             settings.remote_transcription_base_url = url.clone();
@@ -57,11 +79,34 @@ impl ModelPatch {
     }
 
     pub fn inverse(&self, settings: &Settings) -> Self {
+        let sync_primary = self.transcription.is_some()
+            && self.transcription_primary_model.is_none()
+            && self
+                .transcription_mode
+                .unwrap_or(settings.transcription_mode)
+                == lokalbot_core::config_profile::TranscriptionMode::AsymmetricMultiStt;
         Self {
             transcription: self
                 .transcription
                 .as_ref()
                 .map(|_| settings.transcription_model.clone()),
+            transcription_mode: self
+                .transcription_mode
+                .map(|_| settings.transcription_mode),
+            transcription_primary_model: if self.transcription_primary_model.is_some() || sync_primary
+            {
+                Some(settings.transcription_models.primary.id.clone())
+            } else {
+                None
+            },
+            transcription_backup_model: self
+                .transcription_backup_model
+                .as_ref()
+                .map(|_| settings.transcription_models.tr_backup.id.clone()),
+            transcription_fast_helper_model: self
+                .transcription_fast_helper_model
+                .as_ref()
+                .map(|_| settings.transcription_models.fast_helper.id.clone()),
             remote_transcription_base_url: self
                 .remote_transcription_base_url
                 .as_ref()
@@ -89,13 +134,27 @@ impl ModelPatch {
     pub fn needs(&self, settings: &Settings) -> Vec<String> {
         let target = self.applying(settings);
         let mut ids = Vec::new();
-        if self.transcription.is_some() {
-            if !lokalbot_speech::models::is_remote(&target.transcription_model) {
-                ids.push(target.transcription_model.clone());
+        let push_speech = |ids: &mut Vec<String>, id: &str| {
+            if !lokalbot_speech::models::is_remote(id)
+                && lokalbot_speech::models::find(id).is_some_and(|m| m.is_downloadable())
+            {
+                ids.push(id.to_string());
             }
+        };
+        if self.transcription.is_some() {
+            push_speech(&mut ids, &target.transcription_model);
             ids.extend(lokalbot_speech::models::supporting_ids(
                 target.multi_speaker_diarization,
             ));
+        }
+        if self.transcription_primary_model.is_some() {
+            push_speech(&mut ids, &target.transcription_models.primary.id);
+        }
+        if self.transcription_backup_model.is_some() {
+            push_speech(&mut ids, &target.transcription_models.tr_backup.id);
+        }
+        if self.transcription_fast_helper_model.is_some() {
+            push_speech(&mut ids, &target.transcription_models.fast_helper.id);
         }
         if (self.backend.is_some() || self.assistant_model_id.is_some())
             && target.summarizer_backend == SummarizerBackend::BuiltIn
@@ -593,5 +652,34 @@ mod tests {
         assert!(think("m").preparation_context_matches(&latest, &original));
         latest.custom_built_in_models = vec![serde_json::json!({"id": "x"})];
         assert!(!think("m").preparation_context_matches(&latest, &original));
+    }
+
+    #[test]
+    fn needs_skips_bundled_speech_models_and_keeps_downloadable_ones() {
+        let settings = Settings::default();
+        let bundled_patch = ModelPatch {
+            transcription: Some(lokalbot_speech::models::WHISPER_TURBO_MODEL.into()),
+            transcription_primary_model: Some(lokalbot_speech::models::WHISPER_TURBO_MODEL.into()),
+            transcription_backup_model: Some(
+                lokalbot_speech::models::WHISPER_TURBO_TR_KHAN_MODEL.into(),
+            ),
+            transcription_fast_helper_model: Some(
+                lokalbot_speech::models::ZIPFORMER_OAYK_MODEL.into(),
+            ),
+            ..Default::default()
+        };
+        let needs = bundled_patch.needs(&settings);
+        assert!(!needs.contains(&lokalbot_speech::models::WHISPER_TURBO_MODEL.to_string()));
+        assert!(
+            !needs.contains(&lokalbot_speech::models::WHISPER_TURBO_TR_KHAN_MODEL.to_string())
+        );
+        assert!(!needs.contains(&lokalbot_speech::models::ZIPFORMER_OAYK_MODEL.to_string()));
+        assert!(needs.contains(&lokalbot_speech::models::VAD_MODEL.to_string()));
+
+        let downloadable_patch = ModelPatch {
+            transcription_backup_model: Some("parakeet-v3".into()),
+            ..Default::default()
+        };
+        assert_eq!(downloadable_patch.needs(&settings), ["parakeet-v3"]);
     }
 }

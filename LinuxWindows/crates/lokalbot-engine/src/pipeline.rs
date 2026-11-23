@@ -781,10 +781,11 @@ impl Inner {
             }
             _ => crate::post_correction::segments_from_transcript(&transcript),
         };
-        let (corrected, _) = crate::post_correction::correct_transcript(
+        let (corrected, _) = crate::post_correction::correct_transcript_with_runtime(
             meeting,
             &self.shared.library,
             settings,
+            Some(&self.shared.runtime),
             transcript,
             &segments,
             &mut || {

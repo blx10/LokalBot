@@ -289,6 +289,17 @@ pub fn model_set(settings: &Settings) -> Option<Preset> {
 }
 
 pub fn preset_bytes(preset: Preset, settings: &Settings) -> Option<u64> {
+    if preset == Preset::AsymmetricMultiStt {
+        let sizes = [
+            model_bytes(lokalbot_speech::models::WHISPER_TURBO_MODEL, settings),
+            model_bytes(
+                lokalbot_speech::models::WHISPER_TURBO_TR_KHAN_MODEL,
+                settings,
+            ),
+            model_bytes(lokalbot_speech::models::ZIPFORMER_OAYK_MODEL, settings),
+        ];
+        return (!sizes.contains(&0)).then(|| sizes.iter().sum());
+    }
     if settings.cotyping_backend != lokalbot_core::settings::CotypingBackend::OnDevice {
         return None;
     }
@@ -391,14 +402,28 @@ impl SettingsPage {
             ));
         }
 
+        let multi_on = settings.transcription_mode == TranscriptionMode::AsymmetricMultiStt;
         let mut roles = Section::new(lokalbot_i18n::tr("What each model does"))
             .row("settings.models", self.model_set_row(&settings, cx));
         for row in &rows {
             let element = self.role_row(row, &settings, compact, cx);
             roles = roles.row(models::role_setting(row.role), element);
+            if multi_on && row.role == Role::Transcribe {
+                roles = self.append_multi_stt_transcribe_rows(roles, &settings, compact, cx);
+            }
+            if multi_on && row.role == Role::Think {
+                roles = roles.row(
+                    "settings.postCorrection",
+                    settings_row::content_row(
+                        "settings.postCorrection",
+                        self.post_correction_form(&settings, cx).py(px(4.)),
+                        self.is_focused("settings.postCorrection"),
+                        cx,
+                    ),
+                );
+            }
         }
         sections.push(roles);
-        sections.push(self.multi_stt_section(&settings, cx));
         sections.push(self.config_profile_section(cx));
 
         let page = cx.entity();
@@ -588,32 +613,40 @@ impl SettingsPage {
             .into_any_element()
     }
 
-    fn multi_stt_section(&self, settings: &Settings, cx: &mut Context<Self>) -> Section {
+    fn append_multi_stt_transcribe_rows(
+        &self,
+        section: Section,
+        settings: &Settings,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> Section {
         let lb = cx.lb().clone();
-        let mode_data = self.data.clone();
         let fallback_data = self.data.clone();
         let audit_data = self.data.clone();
         let preview_data = self.data.clone();
         let threads_dec = self.data.clone();
         let threads_inc = self.data.clone();
-        let page = cx.entity();
-        let multi_on = settings.transcription_mode == TranscriptionMode::AsymmetricMultiStt;
 
-        let slot_row = |id: &'static str,
-                        role_label: &'static str,
-                        slot: &lokalbot_core::config_profile::SttModelSlot,
-                        setter: fn(&mut Settings, String),
-                        cx: &App| {
+        let slot_role_row = |id: &'static str,
+                             title: &'static str,
+                             subtitle: &'static str,
+                             slot: &lokalbot_core::config_profile::SttModelSlot,
+                             device_id: &'static str,
+                             setter: fn(&mut Settings, String),
+                             change_id: &'static str,
+                             make_patch: fn(String) -> super::model_setup::ModelPatch,
+                             cx: &mut Context<Self>| {
             let slot_data = self.data.clone();
             let selected = if slot.device.eq_ignore_ascii_case("igpu") {
                 0
             } else {
                 1
             };
-            h_flex()
-                .w_full()
+            let heading = h_flex()
                 .gap(px(10.))
                 .items_center()
+                .min_w_0()
+                .child(ui::icon_tile(Ico::AudioLines, lb.accent_text, px(32.)))
                 .child(
                     v_flex()
                         .flex_1()
@@ -622,117 +655,88 @@ impl SettingsPage {
                         .child(
                             div()
                                 .text_size(ty::BODY)
+                                .font_weight(FontWeight::MEDIUM)
                                 .text_color(lb.text)
-                                .child(role_label),
+                                .child(title),
                         )
                         .child(
                             div()
                                 .text_size(ty::SECONDARY)
+                                .line_height(px(18.))
                                 .text_color(lb.text_secondary)
-                                .child(slot.id.clone()),
+                                .child(ui::text::paragraph(subtitle)),
                         ),
+                );
+            let summary = v_flex()
+                .min_w_0()
+                .gap(px(3.))
+                .child(
+                    div()
+                        .text_size(ty::BODY)
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(lb.text)
+                        .line_clamp(2)
+                        .child(model_name(&slot.id)),
                 )
-                .child(settings_row::segmented(
-                    id,
-                    &[lokalbot_i18n::tr("iGPU"), lokalbot_i18n::tr("CPU")],
-                    selected,
-                    move |index, _, cx| {
-                        let device = if index == 0 { "igpu" } else { "cpu" };
-                        slot_data.update(cx, |data, cx| {
-                            data.update_settings(|s| setter(s, device.into()), cx)
-                        });
-                    },
-                    cx,
-                ))
-        };
-
-        let pc_value = if settings.post_correction_enabled {
-            if settings.post_correction_base_url.trim().is_empty() {
-                lokalbot_i18n::tr("Not configured").to_string()
+                .child(
+                    div()
+                        .text_size(ty::SECONDARY)
+                        .text_color(lb.text_secondary)
+                        .truncate()
+                        .child(slot.id.clone()),
+                );
+            let device = settings_row::segmented(
+                device_id,
+                &[lokalbot_i18n::tr("iGPU"), lokalbot_i18n::tr("CPU")],
+                selected,
+                move |index, _, cx| {
+                    let device = if index == 0 { "igpu" } else { "cpu" };
+                    slot_data.update(cx, |data, cx| {
+                        data.update_settings(|s| setter(s, device.into()), cx)
+                    });
+                },
+                cx,
+            );
+            let change = self.speech_slot_change_button(change_id, &slot.id, make_patch, cx);
+            let content = if compact {
+                v_flex()
+                    .w_full()
+                    .gap(px(10.))
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .gap(px(12.))
+                            .items_center()
+                            .child(heading.flex_1())
+                            .child(device)
+                            .child(change),
+                    )
+                    .child(summary.pl(px(42.)))
             } else {
-                lokalbot_i18n::tr("Enabled").to_string()
-            }
-        } else {
-            lokalbot_i18n::tr("Off").to_string()
-        };
-
-        Section::new(lokalbot_i18n::tr("Asymmetric Multi-STT"))
-            .row(
-                "settings.transcriptionMode",
-                settings_row::content_row(
-                    "settings.transcriptionMode",
+                v_flex().w_full().child(
                     h_flex()
                         .w_full()
-                        .gap(px(12.))
+                        .gap(px(16.))
                         .items_center()
-                        .child(
-                            settings_row::label(
-                                lokalbot_i18n::tr("Asymmetric Multi-STT"),
-                                Some(lokalbot_i18n::tr("Runs 3 speech models sequentially and optionally repairs transcripts with remote LLMs.").into()),
-                                cx,
-                            )
-                            .flex_1(),
-                        )
-                        .child(settings_row::switch(
-                            "settings.transcriptionMode",
-                            multi_on,
-                            move |on, _, cx| {
-                                mode_data.update(cx, |data, cx| {
-                                    data.update_settings(
-                                        |s| {
-                                            s.transcription_mode = if on {
-                                                TranscriptionMode::AsymmetricMultiStt
-                                            } else {
-                                                TranscriptionMode::Single
-                                            };
-                                        },
-                                        cx,
-                                    )
-                                });
-                            },
-                        )),
-                    self.is_focused("settings.transcriptionMode"),
-                    cx,
-                ),
-            )
-            .row(
-                "settings.transcriptionModels",
-                settings_row::content_row(
-                    "settings.transcriptionModels",
-                    v_flex()
-                        .w_full()
-                        .gap(px(10.))
-                        .child(slot_row(
-                            "settings-stt-primary-device",
-                            lokalbot_i18n::tr("Primary model"),
-                            &settings.transcription_models.primary,
-                            |s, d| s.transcription_models.primary.device = d,
-                            cx,
-                        ))
-                        .child(slot_row(
-                            "settings-stt-backup-device",
-                            lokalbot_i18n::tr("TR backup model"),
-                            &settings.transcription_models.tr_backup,
-                            |s, d| s.transcription_models.tr_backup.device = d,
-                            cx,
-                        ))
-                        .child(slot_row(
-                            "settings-stt-helper-device",
-                            lokalbot_i18n::tr("Fast helper model"),
-                            &settings.transcription_models.fast_helper,
-                            |s, d| s.transcription_models.fast_helper.device = d,
-                            cx,
-                        )),
-                    false,
-                    cx,
-                ),
-            )
+                        .child(heading.w(px(236.)).flex_none())
+                        .child(summary.flex_1())
+                        .child(device)
+                        .child(change),
+                )
+            };
+            settings_row::content_row(id, content.py(px(2.)), self.is_focused(id), cx)
+        };
+
+        section
             .row(
                 "settings.transcriptionAutoFallbackToCpu",
                 settings_row::row(
                     "settings.transcriptionAutoFallbackToCpu",
                     lokalbot_i18n::tr("Fall back to CPU automatically"),
-                    Some(lokalbot_i18n::tr("Use CPU automatically if no compatible iGPU is found.").into()),
+                    Some(
+                        lokalbot_i18n::tr("Use CPU automatically if no compatible iGPU is found.")
+                            .into(),
+                    ),
                     settings_row::switch(
                         "settings.transcriptionAutoFallbackToCpu",
                         settings.transcription_auto_fallback_to_cpu,
@@ -754,7 +758,12 @@ impl SettingsPage {
                 settings_row::row(
                     "settings.transcriptionSaveAuditLog",
                     lokalbot_i18n::tr("Save post-correction audit log"),
-                    Some(lokalbot_i18n::tr("Write asr-post-correction-audit.json in each meeting folder.").into()),
+                    Some(
+                        lokalbot_i18n::tr(
+                            "Write asr-post-correction-audit.json in each meeting folder.",
+                        )
+                        .into(),
+                    ),
                     settings_row::switch(
                         "settings.transcriptionSaveAuditLog",
                         settings.transcription_save_audit_log,
@@ -798,7 +807,10 @@ impl SettingsPage {
                         .child(
                             settings_row::label(
                                 lokalbot_i18n::tr("CPU threads"),
-                                Some(lokalbot_i18n::tr("Threads used for CPU speech recognition.").into()),
+                                Some(
+                                    lokalbot_i18n::tr("Threads used for CPU speech recognition.")
+                                        .into(),
+                                ),
                                 cx,
                             )
                             .flex_1(),
@@ -851,17 +863,35 @@ impl SettingsPage {
                 ),
             )
             .row(
-                "settings.postCorrection",
-                drill_row(
-                    "settings-models-post-correction",
-                    lokalbot_i18n::tr("Post-correction"),
-                    Some(lokalbot_i18n::tr("Two-stage remote LLM repair after Multi-STT transcription")),
-                    Some(pc_value),
-                    move |_, cx| {
-                        page.update(cx, |page, cx| {
-                            page.models.page = ModelsPage::PostCorrection;
-                            cx.notify();
-                        })
+                "settings.transcriptionBackupModel",
+                slot_role_row(
+                    "settings.transcriptionBackupModel",
+                    lokalbot_i18n::tr("Backup model"),
+                    lokalbot_i18n::tr("Second speech model run sequentially after the primary model"),
+                    &settings.transcription_models.tr_backup,
+                    "settings-stt-backup-device",
+                    |s, d| s.transcription_models.tr_backup.device = d,
+                    "settings-stt-backup-change",
+                    |id| super::model_setup::ModelPatch {
+                        transcription_backup_model: Some(id),
+                        ..Default::default()
+                    },
+                    cx,
+                ),
+            )
+            .row(
+                "settings.transcriptionFastHelperModel",
+                slot_role_row(
+                    "settings.transcriptionFastHelperModel",
+                    lokalbot_i18n::tr("Fast helper model"),
+                    lokalbot_i18n::tr("Fast CPU helper model for cross-checking words"),
+                    &settings.transcription_models.fast_helper,
+                    "settings-stt-helper-device",
+                    |s, d| s.transcription_models.fast_helper.device = d,
+                    "settings-stt-helper-change",
+                    |id| super::model_setup::ModelPatch {
+                        transcription_fast_helper_model: Some(id),
+                        ..Default::default()
                     },
                     cx,
                 ),
@@ -1068,10 +1098,22 @@ impl SettingsPage {
         let entries: Vec<(Preset, String, u64)> = Preset::ALL
             .into_iter()
             .map(|preset| {
-                let (speech, think) = preset.models();
-                let download: u64 = [speech, think]
-                    .iter()
-                    .filter(|id| !installed.iter().any(|have| have == *id))
+                let ids: Vec<&'static str> = if preset == Preset::AsymmetricMultiStt {
+                    vec![
+                        lokalbot_speech::models::WHISPER_TURBO_MODEL,
+                        lokalbot_speech::models::WHISPER_TURBO_TR_KHAN_MODEL,
+                        lokalbot_speech::models::ZIPFORMER_OAYK_MODEL,
+                    ]
+                } else {
+                    let (speech, think) = preset.models();
+                    vec![speech, think]
+                };
+                let download: u64 = ids
+                    .into_iter()
+                    .filter(|id| {
+                        lokalbot_speech::models::find(id).is_none_or(|m| m.is_downloadable())
+                            && !installed.iter().any(|have| have == *id)
+                    })
                     .map(|id| model_bytes(id, settings))
                     .sum();
                 (preset, preset_menu_title(preset, settings), download)
@@ -1239,6 +1281,36 @@ impl SettingsPage {
             });
         let chip = self.chip(row, cx);
         let change = self.change_button(row.role, cx);
+        let primary_device = (row.role == Role::Transcribe
+            && settings.transcription_mode == TranscriptionMode::AsymmetricMultiStt)
+            .then(|| {
+                let slot_data = self.data.clone();
+                let selected = if settings
+                    .transcription_models
+                    .primary
+                    .device
+                    .eq_ignore_ascii_case("igpu")
+                {
+                    0
+                } else {
+                    1
+                };
+                settings_row::segmented(
+                    "settings-stt-primary-device",
+                    &[lokalbot_i18n::tr("iGPU"), lokalbot_i18n::tr("CPU")],
+                    selected,
+                    move |index, _, cx| {
+                        let device = if index == 0 { "igpu" } else { "cpu" };
+                        slot_data.update(cx, |data, cx| {
+                            data.update_settings(
+                                |s| s.transcription_models.primary.device = device.into(),
+                                cx,
+                            )
+                        });
+                    },
+                    cx,
+                )
+            });
         let content = if compact {
             v_flex()
                 .w_full()
@@ -1249,6 +1321,7 @@ impl SettingsPage {
                         .gap(px(12.))
                         .items_center()
                         .child(heading.flex_1())
+                        .children(primary_device)
                         .child(chip)
                         .child(change),
                 )
@@ -1261,6 +1334,7 @@ impl SettingsPage {
                     .items_center()
                     .child(heading.w(px(236.)).flex_none())
                     .child(summary.flex_1())
+                    .children(primary_device)
                     .child(chip)
                     .child(change),
             )

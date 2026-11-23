@@ -372,6 +372,9 @@ fn apply(data: &mut AppData, event: EngineEvent, cx: &mut Context<AppData>) {
         }
         EngineEvent::ModelChecks(status) => data.model_checks = status,
         EngineEvent::ConnectionCheck(check) => data.connection_check = check,
+        EngineEvent::PostCorrectionConnectionCheck(check) => {
+            data.post_correction_connection_check = check
+        }
         EngineEvent::Screen(status) => data.screen = status,
         EngineEvent::ScreenText(status) => {
             data.models.screen_text_ready = status.is_ready();
