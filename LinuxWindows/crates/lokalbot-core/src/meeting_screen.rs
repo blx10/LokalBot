@@ -643,4 +643,38 @@ mod tests {
         let titles: Vec<&str> = rows.iter().map(|r| r.window_title.as_str()).collect();
         assert_eq!(titles, ["Roadmap - Google Docs", "notes.md"]);
     }
+
+    #[test]
+    fn meeting_screenshots_returns_empty_for_invalid_window_and_filters_to_meeting() {
+        let dir = tempfile::tempdir().unwrap();
+        let library = Library::open(crate::paths::LibraryPaths::new(dir.path())).unwrap();
+        let m = meeting();
+        let empty = library
+            .meeting_screenshots(&m, m.started_at, m.started_at)
+            .unwrap();
+        assert!(empty.is_empty());
+
+        let m_id = crate::ids::uuid_upper(&m.id);
+        let other_id = crate::ids::uuid_upper(&uuid::Uuid::new_v4());
+        let ts = (m.started_at + Duration::seconds(10)).timestamp_millis() as f64 / 1000.0;
+        library
+            .with_db(|db| {
+                db.execute(
+                    "INSERT INTO screenshots(ts, path, app, window_title, source_url, meeting_id) VALUES (?1, 'a.jpg', 'Zoom', 'Design', '', ?2)",
+                    params![ts, m_id],
+                )?;
+                db.execute(
+                    "INSERT INTO screenshots(ts, path, app, window_title, source_url, meeting_id) VALUES (?1, 'b.jpg', 'Zoom', 'Other', '', ?2)",
+                    params![ts, other_id],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let rows = library
+            .meeting_screenshots(&m, m.started_at, m.started_at + Duration::seconds(30))
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].window_title, "Design");
+    }
 }

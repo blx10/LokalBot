@@ -306,6 +306,7 @@ impl Store {
         self.profiles_inner()
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn enroll(
         &self,
         meeting: &Meeting,
@@ -422,7 +423,14 @@ impl Store {
         let confirmed = decision.map_or_else(Utc::now, |d| d.confirmed_at);
         let local_user = assignment.is_local_user;
         let contribution = contribution(meeting, assignment, decision_id, confirmed, samples);
-        self.add(contribution, &name, local_user, profile_id, None, &mut database)
+        self.add(
+            contribution,
+            &name,
+            local_user,
+            profile_id,
+            None,
+            &mut database,
+        )
     }
 
     fn add(
@@ -593,8 +601,10 @@ impl Store {
         if source.model != database.profiles[target_ix].model {
             return Err(Failure::Stale);
         }
-        if let (Some(a), Some(b)) = (source.is_local_user, database.profiles[target_ix].is_local_user)
-            && a != b
+        if let (Some(a), Some(b)) = (
+            source.is_local_user,
+            database.profiles[target_ix].is_local_user,
+        ) && a != b
         {
             return Err(Failure::Stale);
         }

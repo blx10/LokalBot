@@ -61,7 +61,7 @@ fn sanitize_value(value: Value, key: Option<&str>) -> Value {
                 .map(|item| sanitize_value(item, None))
                 .collect(),
         ),
-        Value::String(text) => Value::String(redact_url(&text)),
+        Value::String(text) => Value::String(lokalbot_core::text::redact(&redact_url(&text))),
         other => other,
     }
 }
@@ -436,5 +436,17 @@ mod tests {
             serde_json::from_str::<Value>(&files["LokalBot Diagnostics/capture-traces/trace.json"])
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn sanitized_settings_redacts_registered_secrets_in_strings() {
+        lokalbot_core::text::register_redacted_secrets(["gw_diag_str_secret_445566"]);
+        let settings = Settings {
+            transcription_prompt: "note gw_diag_str_secret_445566".into(),
+            ..Default::default()
+        };
+        let text = String::from_utf8(sanitized_settings(&settings).unwrap()).unwrap();
+        assert!(!text.contains("gw_diag_str_secret_445566"));
+        assert!(text.contains("[REDACTED_KEY]"));
     }
 }

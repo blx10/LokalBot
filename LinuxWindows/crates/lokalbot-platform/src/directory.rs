@@ -84,8 +84,7 @@ pub fn parse_ad_search_json(raw: &str) -> Vec<AdPerson> {
 
 #[cfg(windows)]
 pub fn is_ad_joined() -> bool {
-    std::env::var_os("USERDNSDOMAIN")
-        .is_some_and(|v| !v.is_empty())
+    std::env::var_os("USERDNSDOMAIN").is_some_and(|v| !v.is_empty())
 }
 
 #[cfg(not(windows))]
@@ -125,7 +124,14 @@ $rows = foreach ($r in $s.FindAll()) {{ \
 $rows | ConvertTo-Json -Compress"
     );
     let Ok(output) = std::process::Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden", "-Command", &script])
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-WindowStyle",
+            "Hidden",
+            "-Command",
+            &script,
+        ])
         .output()
     else {
         return Vec::new();
@@ -134,7 +140,10 @@ $rows | ConvertTo-Json -Compress"
         return Vec::new();
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_ad_search_json(&stdout).into_iter().take(limit).collect()
+    parse_ad_search_json(&stdout)
+        .into_iter()
+        .take(limit)
+        .collect()
 }
 
 #[cfg(not(windows))]
@@ -168,7 +177,10 @@ mod tests {
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].display_name, "Ayse Yilmaz");
         assert_eq!(parsed[0].object_guid.as_deref(), Some("1122"));
-        assert_eq!(parsed[0].user_principal_name.as_deref(), Some("ayse@corp.local"));
+        assert_eq!(
+            parsed[0].user_principal_name.as_deref(),
+            Some("ayse@corp.local")
+        );
 
         let single = r#"{"displayName":"Alper Torun","objectGuid":"abcd","distinguishedName":null,"userPrincipalName":"alper@corp.local"}"#;
         let parsed_single = parse_ad_search_json(single);

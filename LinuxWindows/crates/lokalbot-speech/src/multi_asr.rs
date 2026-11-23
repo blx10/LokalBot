@@ -345,12 +345,33 @@ impl MultiSttRunner {
         }
         prepared.pieces = coalesce_pieces(prepared.pieces, 2.0, MULTI_STT_MAX_SPAN_SECONDS);
 
-        let (primary_texts, primary_telemetry) =
-            self.run_pass("primary", &self.config.primary, 1, 3, &prepared.pieces, language, progress)?;
-        let (backup_texts, backup_telemetry) =
-            self.run_pass("tr_backup", &self.config.tr_backup, 2, 3, &prepared.pieces, language, progress)?;
-        let (helper_texts, helper_telemetry) =
-            self.run_pass("fast_helper", &self.config.fast_helper, 3, 3, &prepared.pieces, language, progress)?;
+        let (primary_texts, primary_telemetry) = self.run_pass(
+            "primary",
+            &self.config.primary,
+            1,
+            3,
+            &prepared.pieces,
+            language,
+            progress,
+        )?;
+        let (backup_texts, backup_telemetry) = self.run_pass(
+            "tr_backup",
+            &self.config.tr_backup,
+            2,
+            3,
+            &prepared.pieces,
+            language,
+            progress,
+        )?;
+        let (helper_texts, helper_telemetry) = self.run_pass(
+            "fast_helper",
+            &self.config.fast_helper,
+            3,
+            3,
+            &prepared.pieces,
+            language,
+            progress,
+        )?;
 
         let prompt_echo = |model_id: &str| -> Option<PromptEcho> {
             if models::accepts_vocabulary(model_id) {
@@ -592,9 +613,9 @@ fn normalized_language(language: Option<&str>) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use parking_lot::Mutex;
     use std::collections::HashMap;
     use std::sync::atomic::AtomicUsize;
-    use parking_lot::Mutex;
 
     fn speech_with_pauses(bursts: usize) -> Vec<f32> {
         let rate = crate::vad::SAMPLE_RATE;
@@ -801,7 +822,10 @@ mod tests {
         let paths = LibraryPaths::new(dir.path());
         let mut replies = HashMap::new();
         replies.insert(WHISPER_TURBO_MODEL.to_string(), vec!["merhaba".into()]);
-        replies.insert(WHISPER_TURBO_TR_KHAN_MODEL.to_string(), vec!["merhaba".into()]);
+        replies.insert(
+            WHISPER_TURBO_TR_KHAN_MODEL.to_string(),
+            vec!["merhaba".into()],
+        );
         replies.insert(ZIPFORMER_OAYK_MODEL.to_string(), vec!["merhaba".into()]);
 
         let audio = speech_with_pauses(1);

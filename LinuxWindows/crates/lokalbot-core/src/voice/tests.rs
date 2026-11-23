@@ -1187,7 +1187,10 @@ fn ad_metadata_persists_matches_by_guid_and_confirm_user_uses_os_name() {
         local_state.assignment("me").unwrap().name.as_deref(),
         Some(expected.as_str())
     );
-    assert_eq!(local_state.assignment("me").unwrap().is_local_user, Some(true));
+    assert_eq!(
+        local_state.assignment("me").unwrap().is_local_user,
+        Some(true)
+    );
     if !expected.eq_ignore_ascii_case("me") {
         assert_eq!(confirmed.speaker_aliases["me"], expected);
     }

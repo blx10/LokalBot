@@ -2401,4 +2401,41 @@ mod tests {
         assert_eq!(speed_label(1.25), "1.25x");
         assert_eq!(speed_label(0.75), "0.75x");
     }
+
+    #[test]
+    fn caption_at_selects_active_row_for_transcript_jump() {
+        let tmp = tempfile::tempdir().unwrap();
+        let library =
+            lokalbot_core::Library::open(lokalbot_core::LibraryPaths::new(tmp.path())).unwrap();
+        let meeting = library
+            .create_meeting("Caption Jump", "Zoom", lokalbot_core::time::now_seconds())
+            .unwrap();
+        let mut doc = super::super::model::load(&library, meeting);
+        assert_eq!(caption_at(&doc, 1.0), None);
+        doc.rows = vec![
+            super::super::model::TranscriptRow {
+                start: 1.5,
+                end: 3.0,
+                speaker: "me".into(),
+                name: "You".into(),
+                color: 0,
+                text: "First line".into(),
+                begins_turn: true,
+            },
+            super::super::model::TranscriptRow {
+                start: 5.0,
+                end: 7.5,
+                speaker: "them".into(),
+                name: "Alex".into(),
+                color: 1,
+                text: "Second line".into(),
+                begins_turn: true,
+            },
+        ];
+        assert_eq!(caption_at(&doc, 0.2), Some(0));
+        assert_eq!(caption_at(&doc, 1.5), Some(0));
+        assert_eq!(caption_at(&doc, 4.9), Some(0));
+        assert_eq!(caption_at(&doc, 5.0), Some(1));
+        assert_eq!(caption_at(&doc, 9.0), Some(1));
+    }
 }

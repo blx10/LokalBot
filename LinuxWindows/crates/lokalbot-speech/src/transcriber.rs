@@ -1244,18 +1244,17 @@ pub(crate) fn prepare_meeting_pieces(
                                 match load_voice_extractor(paths, resolver, threads) {
                                     Ok(extractor) => voice_slot = Some(extractor),
                                     Err(err)
-                                        if err
-                                            .downcast_ref::<SpeechError>()
-                                            .is_some_and(|e| {
-                                                matches!(e, SpeechError::NotInstalled(_))
-                                            }) => {}
+                                        if err.downcast_ref::<SpeechError>().is_some_and(|e| {
+                                            matches!(e, SpeechError::NotInstalled(_))
+                                        }) => {}
                                     Err(err) => return Err(err),
                                 }
                             }
                             if let Some(extractor) = voice_slot.as_ref() {
-                                let vs = voice_samples(extractor, &samples, &turns, source, &|| {
-                                    cancelled.load(Ordering::Relaxed)
-                                });
+                                let vs =
+                                    voice_samples(extractor, &samples, &turns, source, &|| {
+                                        cancelled.load(Ordering::Relaxed)
+                                    });
                                 out.samples.push((source, vs));
                             }
                         }

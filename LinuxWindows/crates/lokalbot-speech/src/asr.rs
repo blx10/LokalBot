@@ -213,8 +213,7 @@ impl Asr {
             let dir = models::resolve_model_dir(paths, &config.models_paths, model);
             models::verify_integrity(&dir, model)?;
         }
-        let sherpa_cfg =
-            build_sherpa_config(paths, &config.models_paths, model, config.threads)?;
+        let sherpa_cfg = build_sherpa_config(paths, &config.models_paths, model, config.threads)?;
         let recognizer = create(&sherpa_cfg, model)?;
         Ok(Self {
             inner: AsrInner::Sherpa {

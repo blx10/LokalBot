@@ -341,7 +341,10 @@ pub fn naming_lists(
                 speech_seconds: speech.get(&item.key).copied().unwrap_or(0.),
                 action_count: item.action_count,
                 recognized_name: recognized.get(&item.key).cloned(),
-                voice_suggestions: voice_suggestions.get(&item.key).cloned().unwrap_or_default(),
+                voice_suggestions: voice_suggestions
+                    .get(&item.key)
+                    .cloned()
+                    .unwrap_or_default(),
             })
         })
         .collect();
@@ -939,10 +942,7 @@ mod tests {
             &suggestions,
         );
         assert_eq!(voices[0].voice_suggestions.len(), 1);
-        assert_eq!(
-            NamingDraft::similarity_percent(&suggestions["them"][0]),
-            72
-        );
+        assert_eq!(NamingDraft::similarity_percent(&suggestions["them"][0]), 72);
         let mut draft = NamingDraft::new(&voices, &[]);
         let mut pick = pick(&format!("profile:{profile_id}"), "Ada");
         pick.profile_id = Some(profile_id);

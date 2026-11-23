@@ -328,4 +328,30 @@ mod tests {
         assert_eq!(t.segments.len(), 2);
         assert_eq!(normalized_text(&t.segments[1].text), "Real speech");
     }
+
+    #[test]
+    fn hallucination_guards_trim_excessive_repeats_and_short_impossible_rows() {
+        let repeated = ["merhaba dünya"; 20].join(" ");
+        let mut t = transcript(vec![
+            segment(0.0, 2.0, &repeated, Some(TimingPrecision::Span)),
+            segment(
+                2.5,
+                2.8,
+                "bir iki üç dört beş altı yedi sekiz dokuz",
+                Some(TimingPrecision::Span),
+            ),
+            segment(
+                3.0,
+                6.0,
+                "Normal toplantı notu.",
+                Some(TimingPrecision::Span),
+            ),
+        ]);
+        let report = sanitize(&mut t, None);
+        assert!(report.changed());
+        assert_eq!(report.removed_segments, 1);
+        assert_eq!(t.segments.len(), 2);
+        assert_eq!(t.segments[0].text, "merhaba dünya merhaba dünya");
+        assert_eq!(t.segments[1].text, "Normal toplantı notu.");
+    }
 }

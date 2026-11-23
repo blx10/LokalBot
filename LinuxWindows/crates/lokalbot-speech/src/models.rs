@@ -948,11 +948,7 @@ mod tests {
         let mut marker: Marker =
             serde_json::from_slice(&std::fs::read(model_dir.join(MARKER)).unwrap()).unwrap();
         marker.id = "wrong".into();
-        std::fs::write(
-            model_dir.join(MARKER),
-            serde_json::to_vec(&marker).unwrap(),
-        )
-        .unwrap();
+        std::fs::write(model_dir.join(MARKER), serde_json::to_vec(&marker).unwrap()).unwrap();
         assert!(verify_integrity(&model_dir, model).is_err());
     }
 
@@ -1056,8 +1052,27 @@ mod tests {
             Some(std::ffi::OsStr::new("")),
         );
         assert!(
-            dirs.iter().all(|(d, _)| !d.as_os_str().is_empty() && d.is_absolute()),
+            dirs.iter()
+                .all(|(d, _)| !d.as_os_str().is_empty() && d.is_absolute()),
             "empty env var produced relative candidate: {dirs:?}"
         );
+    }
+
+    #[test]
+    fn whisper_turbo_catalog_entry_and_paths_are_valid() {
+        let model = find(WHISPER_TURBO_MODEL).expect("whisper-turbo registered");
+        assert!(model.bundled);
+        assert!(!model.supports_prompt);
+        assert!(model.files.contains(&"ggml-model.bin"));
+        assert!(multi_stt_default_ids().contains(&WHISPER_TURBO_MODEL));
+    }
+
+    #[test]
+    fn whisper_turbo_tr_khan_catalog_entry_supports_turkish() {
+        let model = find(WHISPER_TURBO_TR_KHAN_MODEL).expect("whisper-turbo-tr-khan registered");
+        assert!(model.bundled);
+        assert!(model.languages.contains(&"tr"));
+        assert!(model.files.contains(&"ggml-model.bin"));
+        assert!(multi_stt_default_ids().contains(&WHISPER_TURBO_TR_KHAN_MODEL));
     }
 }

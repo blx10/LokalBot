@@ -33,4 +33,4 @@ backend = "built_in"
 base_url = ""
 api_key = ""
 model = "Qwen3.8-27B"
-disable_local_llama_server = false
+disable_local_llama_server = true

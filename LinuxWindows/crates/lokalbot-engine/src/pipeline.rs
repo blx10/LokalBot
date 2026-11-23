@@ -471,11 +471,15 @@ impl Inner {
 
         let has_transcript = library.transcript(&meeting)?.is_some();
         if job.transcribe || !has_transcript {
+            let multi_stt_cfg = self.models.multi_stt_config();
             let requirements = self.models.meeting_requirements(false);
             if !self.models.ensure(&requirements, job.user_initiated)? {
                 return Ok(Outcome::WaitingForModels(Need::Transcription));
             }
-            if !job.user_initiated && self.models.transcription_server_blocked() {
+            if !job.user_initiated
+                && multi_stt_cfg.is_none()
+                && self.models.transcription_server_blocked()
+            {
                 return Ok(Outcome::WaitingForModels(Need::Transcription));
             }
             library.mark_job_started(meeting.id)?;
@@ -489,6 +493,10 @@ impl Inner {
             if audio.mic.is_none() && audio.system.is_none() {
                 anyhow::bail!("No recording available.");
             }
+            let vocab_model_id = multi_stt_cfg
+                .as_ref()
+                .map(|c| c.primary.id.as_str())
+                .unwrap_or(&settings.transcription_model);
             let options = lokalbot_speech::TranscribeOptions {
                 language: Some(settings.transcription_language.clone())
                     .filter(|l| l != "auto" && !l.is_empty()),
@@ -498,7 +506,7 @@ impl Inner {
                     &meeting,
                     library,
                     &settings,
-                    lokalbot_speech::models::accepts_vocabulary(&settings.transcription_model),
+                    lokalbot_speech::models::accepts_vocabulary(vocab_model_id),
                     job.resumed,
                 ))
                 .filter(|p| !p.trim().is_empty()),
@@ -512,78 +520,136 @@ impl Inner {
                 )),
             };
             self.stage(&meeting, Stage::Transcribing, "Transcribing", None);
-            let detailed = self
-                .shared
-                .speech
-                .with_in_background(&self.shared, &settings.transcription_model, |transcriber| {
-                    transcriber.transcribe_meeting_detailed(
-                        audio.mic.as_deref(),
-                        audio.system.as_deref(),
-                        &options,
-                        &mut |progress| match progress {
-                            lokalbot_speech::TranscribeProgress::Transcribing { fraction } => {
-                                self.shared.speech.stand_aside();
-                                self.stage(
-                                    &meeting,
-                                    Stage::Transcribing,
-                                    "Transcribing",
-                                    Some(fraction),
-                                )
-                            }
-                            lokalbot_speech::TranscribeProgress::IdentifyingSpeakers => self.stage(
+            let (transcript, multi_segments) = if let Some(multi_cfg) = multi_stt_cfg.as_ref() {
+                let (transcript, multi_result) = transcribe_meeting_multi_stt(
+                    &self.shared,
+                    &meeting,
+                    multi_cfg,
+                    audio.mic.as_deref(),
+                    audio.system.as_deref(),
+                    &options,
+                    &mut |progress| match progress {
+                        lokalbot_speech::MultiSttProgress::DetectingSpeech => self.stage(
+                            &meeting,
+                            Stage::PreparingModel("speech detection".into()),
+                            "Preparing transcription model",
+                            None,
+                        ),
+                        lokalbot_speech::MultiSttProgress::IdentifyingSpeakers => self.stage(
+                            &meeting,
+                            Stage::IdentifyingSpeakers,
+                            "Separating speakers",
+                            None,
+                        ),
+                        lokalbot_speech::MultiSttProgress::LoadingModel { model_id, .. } => self
+                            .stage(
                                 &meeting,
-                                Stage::IdentifyingSpeakers,
-                                "Separating speakers",
+                                Stage::PreparingModel(model_id),
+                                "Preparing transcription model",
                                 None,
                             ),
-                            _ => {}
+                        lokalbot_speech::MultiSttProgress::Transcribing { fraction, .. } => {
+                            self.shared.speech.stand_aside();
+                            self.stage(
+                                &meeting,
+                                Stage::Transcribing,
+                                "Transcribing",
+                                Some(fraction),
+                            )
+                        }
+                    },
+                )?;
+                (transcript, Some(multi_result.segments))
+            } else {
+                let detailed = self
+                    .shared
+                    .speech
+                    .with_in_background(
+                        &self.shared,
+                        &settings.transcription_model,
+                        |transcriber| {
+                            transcriber.transcribe_meeting_detailed(
+                                audio.mic.as_deref(),
+                                audio.system.as_deref(),
+                                &options,
+                                &mut |progress| match progress {
+                                    lokalbot_speech::TranscribeProgress::Transcribing {
+                                        fraction,
+                                    } => {
+                                        self.shared.speech.stand_aside();
+                                        self.stage(
+                                            &meeting,
+                                            Stage::Transcribing,
+                                            "Transcribing",
+                                            Some(fraction),
+                                        )
+                                    }
+                                    lokalbot_speech::TranscribeProgress::IdentifyingSpeakers => {
+                                        self.stage(
+                                            &meeting,
+                                            Stage::IdentifyingSpeakers,
+                                            "Separating speakers",
+                                            None,
+                                        )
+                                    }
+                                    _ => {}
+                                },
+                            )
                         },
                     )
-                })
-                .context("transcription")?;
-            let mut transcript = detailed.transcript;
-            if let Some(range) = meeting.valid_content_range() {
-                range.apply(&mut transcript);
-            }
-            let previous = library.transcript(&meeting)?;
-            let memory = crate::voice::memory(library);
-            let evidence = crate::voice::microphone_evidence(
-                library,
-                &meeting,
-                &transcript,
-                &detailed.turns,
-                &detailed.samples,
-            );
-            let identified = memory.process(lokalbot_core::voice::ProcessRequest {
-                transcript: &transcript,
-                meeting: &meeting,
-                turns: &detailed.turns,
-                evidence,
-                mic: audio.mic.as_deref(),
-                system: audio.system.as_deref(),
-                previous: previous.as_ref(),
-                name_automatically: crate::voice::NAME_SPEAKERS_AUTOMATICALLY,
-            });
-            transcript = match identified {
-                Ok(named) => named,
-                Err(err) => {
-                    log::warn!("speaker identity skipped meeting={}: {err}", meeting.id);
-                    memory.note_unavailable(meeting.id, &err);
-                    if let Some(previous) = &previous {
-                        transcript.carry_speaker_names_from(previous);
-                    }
-                    transcript
+                    .context("transcription")?;
+                let mut transcript = detailed.transcript;
+                if let Some(range) = meeting.valid_content_range() {
+                    range.apply(&mut transcript);
                 }
+                let previous = library.transcript(&meeting)?;
+                let memory = crate::voice::memory(library);
+                let evidence = crate::voice::microphone_evidence(
+                    library,
+                    &meeting,
+                    &transcript,
+                    &detailed.turns,
+                    &detailed.samples,
+                );
+                let identified = memory.process(lokalbot_core::voice::ProcessRequest {
+                    transcript: &transcript,
+                    meeting: &meeting,
+                    turns: &detailed.turns,
+                    evidence,
+                    mic: audio.mic.as_deref(),
+                    system: audio.system.as_deref(),
+                    previous: previous.as_ref(),
+                    name_automatically: crate::voice::NAME_SPEAKERS_AUTOMATICALLY,
+                });
+                transcript = match identified {
+                    Ok(named) => named,
+                    Err(err) => {
+                        log::warn!("speaker identity skipped meeting={}: {err}", meeting.id);
+                        memory.note_unavailable(meeting.id, &err);
+                        if let Some(previous) = &previous {
+                            transcript.carry_speaker_names_from(previous);
+                        }
+                        transcript
+                    }
+                };
+                let transcript = finished_transcript(
+                    &meeting,
+                    &library.meeting_dir(&meeting),
+                    previous.as_ref(),
+                    transcript,
+                    options.vocabulary_prompt.as_deref(),
+                )?;
+                (
+                    memory.applying_latest_decision(&transcript, meeting.id),
+                    None,
+                )
             };
-            let transcript = finished_transcript(
+            let transcript = self.post_correct_transcript(
                 &meeting,
-                &library.meeting_dir(&meeting),
-                previous.as_ref(),
+                &settings,
                 transcript,
-                options.vocabulary_prompt.as_deref(),
+                multi_segments.as_deref(),
             )?;
-            let transcript = memory.applying_latest_decision(&transcript, meeting.id);
-            let transcript = self.post_correct_transcript(&meeting, &settings, transcript)?;
             library.save_new_transcript(&meeting, &transcript)?;
             library.mark_transcription_completed(meeting.id)?;
             library.reindex_meeting(&meeting)?;
@@ -706,8 +772,14 @@ impl Inner {
         meeting: &Meeting,
         settings: &lokalbot_core::Settings,
         transcript: lokalbot_core::Transcript,
+        multi_segments: Option<&[lokalbot_speech::MultiSttSegment]>,
     ) -> Result<lokalbot_core::Transcript> {
-        let segments = crate::post_correction::segments_from_transcript(&transcript);
+        let segments = match multi_segments {
+            Some(segs) if segs.len() == transcript.segments.len() => {
+                crate::post_correction::segments_from_multi_stt(segs)
+            }
+            _ => crate::post_correction::segments_from_transcript(&transcript),
+        };
         let (corrected, _) = crate::post_correction::correct_transcript(
             meeting,
             &self.shared.library,
@@ -722,7 +794,6 @@ impl Inner {
     }
 }
 
-#[allow(dead_code)]
 pub(crate) fn transcribe_meeting_multi_stt(
     shared: &Shared,
     meeting: &Meeting,
@@ -790,7 +861,6 @@ pub(crate) fn transcribe_meeting_multi_stt(
     Ok((transcript, detailed))
 }
 
-#[allow(dead_code)]
 fn reconcile_multi_segments(
     transcript: &Transcript,
     previous_segments: Vec<lokalbot_speech::MultiSttSegment>,
@@ -1409,8 +1479,8 @@ mod tests {
             .then_some(prompt)
             .flatten();
         assert_eq!(guarded_prompt, None);
-        transcript = finished_transcript(&meeting, dir.path(), None, transcript, guarded_prompt)
-            .unwrap();
+        transcript =
+            finished_transcript(&meeting, dir.path(), None, transcript, guarded_prompt).unwrap();
         assert_eq!(transcript.segments.len(), 2);
 
         let range = lokalbot_core::ContentRange {
@@ -1526,7 +1596,7 @@ mod tests {
         };
         let corrected = pipeline
             .inner
-            .post_correct_transcript(&meeting, &settings, transcript)
+            .post_correct_transcript(&meeting, &settings, transcript, None)
             .unwrap();
         pipeline.stop();
 
@@ -1637,7 +1707,7 @@ mod tests {
         };
         let corrected = pipeline
             .inner
-            .post_correct_transcript(&meeting, &settings, transcript)
+            .post_correct_transcript(&meeting, &settings, transcript, None)
             .unwrap();
         pipeline.stop();
 
@@ -1699,7 +1769,7 @@ mod tests {
 
         let out_unconfigured = pipeline
             .inner
-            .post_correct_transcript(&meeting, &settings_unconfigured, transcript.clone())
+            .post_correct_transcript(&meeting, &settings_unconfigured, transcript.clone(), None)
             .unwrap();
         assert_eq!(out_unconfigured.segments[0].text, "unchanged");
 
@@ -1715,12 +1785,169 @@ mod tests {
         );
         let out_disabled = pipeline
             .inner
-            .post_correct_transcript(&meeting, &settings_disabled, transcript)
+            .post_correct_transcript(&meeting, &settings_disabled, transcript, None)
             .unwrap();
         assert_eq!(out_disabled.segments[0].text, "unchanged");
         pipeline.stop();
 
         assert!(!stages.lock().contains(&Some(Stage::PostCorrecting)));
         assert_eq!(hits.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn single_mode_bypasses_multi_stt_runner_and_keeps_single_model_requirements() {
+        let (_dir, library) = library();
+        let settings = lokalbot_core::Settings {
+            transcription_mode: lokalbot_core::config_profile::TranscriptionMode::Single,
+            transcription_model: "parakeet-v3".into(),
+            ..Default::default()
+        };
+        let single_cfg = crate::speech::MultiSttConfig::from_settings(&settings);
+        assert!(!single_cfg.enabled);
+
+        let shared = Shared::for_tests(library.clone(), settings, |_| {});
+        let models = crate::models::Models::new(shared);
+        assert!(models.multi_stt_config().is_none());
+        let reqs = models.meeting_requirements(false);
+        assert!(reqs.contains(&"parakeet-v3".to_string()));
+        assert!(!reqs.contains(&lokalbot_speech::models::WHISPER_TURBO_TR_KHAN_MODEL.to_string()));
+        assert!(!reqs.contains(&lokalbot_speech::models::ZIPFORMER_OAYK_MODEL.to_string()));
+
+        let multi_settings = lokalbot_core::Settings {
+            transcription_mode:
+                lokalbot_core::config_profile::TranscriptionMode::AsymmetricMultiStt,
+            ..Default::default()
+        };
+        let multi_shared = Shared::for_tests(library, multi_settings, |_| {});
+        let multi_models = crate::models::Models::new(multi_shared);
+        assert!(multi_models.multi_stt_config().is_some());
+        let multi_reqs = multi_models.meeting_requirements(false);
+        assert!(multi_reqs.contains(&lokalbot_speech::models::WHISPER_TURBO_MODEL.to_string()));
+        assert!(
+            multi_reqs.contains(&lokalbot_speech::models::WHISPER_TURBO_TR_KHAN_MODEL.to_string())
+        );
+        assert!(multi_reqs.contains(&lokalbot_speech::models::ZIPFORMER_OAYK_MODEL.to_string()));
+    }
+
+    #[test]
+    fn pipeline_post_correction_receives_multi_stt_hypotheses() {
+        use lokalbot_ai::post_correction::PostCorrectionConfig;
+        use lokalbot_core::model::transcript::{Segment, Transcript};
+        use std::io::{BufRead, BufReader, Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let saw_tr_backup = Arc::new(AtomicBool::new(false));
+        let saw_fast_helper = Arc::new(AtomicBool::new(false));
+        let b_flag = saw_tr_backup.clone();
+        let h_flag = saw_fast_helper.clone();
+        std::thread::spawn(move || {
+            for mut stream in listener.incoming().flatten() {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut first = String::new();
+                let _ = reader.read_line(&mut first);
+                let mut len = 0usize;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    let line = line.trim_end();
+                    if line.is_empty() {
+                        break;
+                    }
+                    if let Some((k, v)) = line.split_once(':')
+                        && k.eq_ignore_ascii_case("content-length")
+                    {
+                        len = v.trim().parse().unwrap_or(0);
+                    }
+                }
+                let mut buf = vec![0u8; len];
+                let _ = reader.read_exact(&mut buf);
+                let req_json: serde_json::Value =
+                    serde_json::from_slice(&buf).unwrap_or(serde_json::Value::Null);
+                let payload = req_json.to_string();
+                if payload.contains("LocalBOT kurulumu") {
+                    b_flag.store(true, Ordering::SeqCst);
+                }
+                if payload.contains("lokalbot kurulumu") {
+                    h_flag.store(true, Ordering::SeqCst);
+                }
+                let model = req_json["model"].as_str().unwrap_or("");
+                let content = match model {
+                    "Qwen3.8-27B" => {
+                        r#"{"segments":[{"segment_id":1,"text":"LokalBot kurulumu"}]}"#
+                    }
+                    _ => r#"{"candidates":[]}"#,
+                };
+                let body = serde_json::json!({
+                    "choices": [{
+                        "message": { "role": "assistant", "content": content },
+                        "finish_reason": "stop"
+                    }]
+                })
+                .to_string();
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(body.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+
+        let (_dir, library) = library();
+        let meeting = finished_without_audio(&library);
+        let settings = lokalbot_core::Settings {
+            post_correction_enabled: true,
+            post_correction_base_url: format!("http://127.0.0.1:{port}/v1"),
+            post_correction_api_key: "sk-typed-pc-secret".into(),
+            transcription_save_audit_log: true,
+            ..Default::default()
+        };
+        let _defaults = PostCorrectionConfig::default();
+
+        let shared = Shared::for_tests(library.clone(), settings.clone(), |_| {});
+        let models = crate::models::Models::new(shared.clone());
+        let pipeline = Pipeline::start(shared, models);
+
+        let transcript = Transcript {
+            segments: vec![Segment {
+                start: 0.0,
+                end: 2.0,
+                speaker: "Speaker 1".into(),
+                text: "lokal bot kurulumu".into(),
+                confidence: None,
+                timing_precision: None,
+                attribution: None,
+            }],
+            ..Default::default()
+        };
+        let multi = vec![lokalbot_speech::MultiSttSegment {
+            segment_id: 0,
+            start: 0.0,
+            end: 2.0,
+            speaker: "Speaker 1".into(),
+            primary: "lokal bot kurulumu".into(),
+            tr_backup: "LocalBOT kurulumu".into(),
+            fast_helper: "lokalbot kurulumu".into(),
+            timing_precision: None,
+            attribution: None,
+        }];
+        let corrected = pipeline
+            .inner
+            .post_correct_transcript(&meeting, &settings, transcript, Some(&multi))
+            .unwrap();
+        pipeline.stop();
+
+        assert_eq!(corrected.segments[0].text, "LokalBot kurulumu");
+        assert!(saw_tr_backup.load(Ordering::SeqCst));
+        assert!(saw_fast_helper.load(Ordering::SeqCst));
+        let audit_path = library
+            .meeting_dir(&meeting)
+            .join(crate::post_correction::AUDIT_FILE_NAME);
+        assert!(audit_path.is_file());
     }
 }

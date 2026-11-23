@@ -212,15 +212,6 @@ impl Shared {
     }
 }
 
-pub(crate) fn effective_openai_api_key(settings: &Settings) -> Option<String> {
-    let key = settings.think_api_key.trim();
-    if !key.is_empty() {
-        Some(key.to_string())
-    } else {
-        secrets::openai_api_key()
-    }
-}
-
 impl Shared {
     pub fn background_conditions_changed(&self) {
         if let Some(files) = self.files.lock().as_ref() {
@@ -484,6 +475,11 @@ fn dispatch(shared: Arc<Shared>, commands: Sender<Command>, receiver: Receiver<C
                 });
                 if let Some(folder) = newly_recording(before, recording.active_folder()) {
                     live.prepare(folder);
+                    if shared.settings().live_preview_during_meeting
+                        && models.missing(&models.dictation_requirements()).is_empty()
+                    {
+                        live.start(false);
+                    }
                 }
             }
             Command::RecordCalendarEvent(event) => {
@@ -496,6 +492,11 @@ fn dispatch(shared: Arc<Shared>, commands: Sender<Command>, receiver: Receiver<C
                 });
                 if let Some(folder) = newly_recording(before, recording.active_folder()) {
                     live.prepare(folder);
+                    if shared.settings().live_preview_during_meeting
+                        && models.missing(&models.dictation_requirements()).is_empty()
+                    {
+                        live.start(false);
+                    }
                 }
             }
             Command::StartDetectedRecording {
@@ -512,6 +513,11 @@ fn dispatch(shared: Arc<Shared>, commands: Sender<Command>, receiver: Receiver<C
                 });
                 if let Some(folder) = newly_recording(before, recording.active_folder()) {
                     live.prepare(folder);
+                    if shared.settings().live_preview_during_meeting
+                        && models.missing(&models.dictation_requirements()).is_empty()
+                    {
+                        live.start(false);
+                    }
                 }
             }
             Command::CallEnded => {
@@ -719,7 +725,7 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            super::effective_openai_api_key(&settings).as_deref(),
+            super::secrets::resolve_openai_api_key(&settings).as_deref(),
             Some("config-think-secret-key")
         );
     }

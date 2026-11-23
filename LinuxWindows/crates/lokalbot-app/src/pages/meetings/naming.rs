@@ -131,8 +131,10 @@ impl NamingSheet {
                         ))
                     });
                     let speaker_key = speaker.to_string();
-                    cx.subscribe_in(&input, window, move |this, input, event: &InputEvent, window, cx| {
-                        match event {
+                    cx.subscribe_in(
+                        &input,
+                        window,
+                        move |this, input, event: &InputEvent, window, cx| match event {
                             InputEvent::Change => {
                                 let typed = input.read(cx).value().to_string();
                                 let key_match = SpeakerSuggestion::name_key(&typed);
@@ -140,8 +142,7 @@ impl NamingSheet {
                                     s != &speaker_key
                                         || this.remembered_people.iter().any(|p| {
                                             p.id == *pid
-                                                && SpeakerSuggestion::name_key(&p.name)
-                                                    == key_match
+                                                && SpeakerSuggestion::name_key(&p.name) == key_match
                                         })
                                 });
                                 this.refresh_ad(&speaker_key, &typed, window, cx);
@@ -149,8 +150,8 @@ impl NamingSheet {
                             }
                             InputEvent::PressEnter { .. } => this.save(window, cx),
                             _ => {}
-                        }
-                    })
+                        },
+                    )
                     .detach();
                     self.typed.insert(speaker.to_string(), input.clone());
                     input
@@ -210,8 +211,11 @@ impl NamingSheet {
                     for choice in choices {
                         let speaker = choice.speaker.clone();
                         let choice_name = choice.name;
-                        let mut decision =
-                            Choice::new(&speaker, Some(choice_name.clone()), DecisionAction::Assign);
+                        let mut decision = Choice::new(
+                            &speaker,
+                            Some(choice_name.clone()),
+                            DecisionAction::Assign,
+                        );
                         decision.calendar_identity_id = choice.calendar_identity_id;
                         if current.can_confirm_speaker(&speaker) {
                             decision.profile_id = choice.profile_id;
@@ -324,8 +328,7 @@ impl NamingSheet {
                     .recognized_name
                     .as_ref()
                     .filter(|rec| {
-                        SpeakerSuggestion::name_key(rec)
-                            == SpeakerSuggestion::name_key(&found.name)
+                        SpeakerSuggestion::name_key(rec) == SpeakerSuggestion::name_key(&found.name)
                     })
                     .map(|rec| {
                         let mut pick =
@@ -515,20 +518,17 @@ impl NamingSheet {
                         |this, input| {
                             let query = input.read(cx).value().to_string();
                             let matches = self.matching_profiles(&query);
-                            let ad_matches = self
-                                .ad_results
-                                .get(&voice.key)
-                                .cloned()
-                                .unwrap_or_default();
+                            let ad_matches =
+                                self.ad_results.get(&voice.key).cloned().unwrap_or_default();
                             let speaker_key = voice.key.clone();
                             this.child(
                                 v_flex()
                                     .gap(px(6.))
                                     .child(div().max_w(px(280.)).child(Input::new(&input).small()))
                                     .when(!matches.is_empty(), |col| {
-                                        col.child(
-                                            h_flex().flex_wrap().gap(px(6.)).children(
-                                                matches.into_iter().enumerate().map(|(m_ix, person)| {
+                                        col.child(h_flex().flex_wrap().gap(px(6.)).children(
+                                            matches.into_iter().enumerate().map(
+                                                |(m_ix, person)| {
                                                     let selected = self
                                                         .draft
                                                         .typed_profile_ids
@@ -544,25 +544,31 @@ impl NamingSheet {
                                                         selected,
                                                         cx,
                                                     )
-                                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                                        this.ad_selected.remove(&speaker_for_click);
-                                                        this.draft.typed_profile_ids.insert(
-                                                            speaker_for_click.clone(),
-                                                            person_id,
-                                                        );
-                                                        input_for_click.update(cx, |state, cx| {
-                                                            state.set_value(
-                                                                person_name.clone(),
-                                                                window,
-                                                                cx,
+                                                    .on_click(cx.listener(
+                                                        move |this, _, window, cx| {
+                                                            this.ad_selected
+                                                                .remove(&speaker_for_click);
+                                                            this.draft.typed_profile_ids.insert(
+                                                                speaker_for_click.clone(),
+                                                                person_id,
                                                             );
-                                                        });
-                                                        cx.notify();
-                                                    }))
+                                                            input_for_click.update(
+                                                                cx,
+                                                                |state, cx| {
+                                                                    state.set_value(
+                                                                        person_name.clone(),
+                                                                        window,
+                                                                        cx,
+                                                                    );
+                                                                },
+                                                            );
+                                                            cx.notify();
+                                                        },
+                                                    ))
                                                     .into_any_element()
-                                                }),
+                                                },
                                             ),
-                                        )
+                                        ))
                                     })
                                     .when(!ad_matches.is_empty(), |col| {
                                         let speaker_for_ad = speaker_key.clone();
@@ -573,32 +579,42 @@ impl NamingSheet {
                                                     div()
                                                         .text_size(ty::CAPTION)
                                                         .text_color(lb.text_secondary)
-                                                        .child(lokalbot_i18n::tr("Active Directory")),
+                                                        .child(lokalbot_i18n::tr(
+                                                            "Active Directory",
+                                                        )),
                                                 )
-                                                .child(
-                                                    h_flex().flex_wrap().gap(px(6.)).children(
-                                                        ad_matches.into_iter().enumerate().map(
-                                                            |(a_ix, person)| {
-                                                                let selected = self
-                                                                    .ad_selected
-                                                                    .get(&speaker_for_ad)
-                                                                    == Some(&person);
-                                                                let speaker_for_click =
-                                                                    speaker_for_ad.clone();
-                                                                let input_for_click = input.clone();
-                                                                let chosen = person.clone();
-                                                                let label = match &person.user_principal_name {
-                                                                    Some(upn) => format!("{} ({upn})", person.display_name),
-                                                                    None => person.display_name.clone(),
-                                                                };
-                                                                name_chip(
-                                                                    format!("naming-ad-{ix}-{a_ix}").into(),
-                                                                    label,
-                                                                    selected,
-                                                                    cx,
-                                                                )
-                                                                .on_click(cx.listener(move |this, _, window, cx| {
-                                                                    this.draft.typed_profile_ids.remove(&speaker_for_click);
+                                                .child(h_flex().flex_wrap().gap(px(6.)).children(
+                                                    ad_matches.into_iter().enumerate().map(
+                                                        |(a_ix, person)| {
+                                                            let selected = self
+                                                                .ad_selected
+                                                                .get(&speaker_for_ad)
+                                                                == Some(&person);
+                                                            let speaker_for_click =
+                                                                speaker_for_ad.clone();
+                                                            let input_for_click = input.clone();
+                                                            let chosen = person.clone();
+                                                            let label = match &person
+                                                                .user_principal_name
+                                                            {
+                                                                Some(upn) => format!(
+                                                                    "{} ({upn})",
+                                                                    person.display_name
+                                                                ),
+                                                                None => person.display_name.clone(),
+                                                            };
+                                                            name_chip(
+                                                                format!("naming-ad-{ix}-{a_ix}")
+                                                                    .into(),
+                                                                label,
+                                                                selected,
+                                                                cx,
+                                                            )
+                                                            .on_click(cx.listener(
+                                                                move |this, _, window, cx| {
+                                                                    this.draft
+                                                                        .typed_profile_ids
+                                                                        .remove(&speaker_for_click);
                                                                     this.ad_selected.insert(
                                                                         speaker_for_click.clone(),
                                                                         chosen.clone(),
@@ -607,20 +623,25 @@ impl NamingSheet {
                                                                         speaker_for_click.clone(),
                                                                         chosen.display_name.clone(),
                                                                     );
-                                                                    input_for_click.update(cx, |state, cx| {
-                                                                        state.set_value(
-                                                                            chosen.display_name.clone(),
-                                                                            window,
-                                                                            cx,
-                                                                        );
-                                                                    });
+                                                                    input_for_click.update(
+                                                                        cx,
+                                                                        |state, cx| {
+                                                                            state.set_value(
+                                                                                chosen
+                                                                                    .display_name
+                                                                                    .clone(),
+                                                                                window,
+                                                                                cx,
+                                                                            );
+                                                                        },
+                                                                    );
                                                                     cx.notify();
-                                                                }))
-                                                                .into_any_element()
-                                                            },
-                                                        ),
+                                                                },
+                                                            ))
+                                                            .into_any_element()
+                                                        },
                                                     ),
-                                                ),
+                                                )),
                                         )
                                     }),
                             )

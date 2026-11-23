@@ -589,4 +589,15 @@ mod tests {
         assert!((player.position() - 1.5).abs() < 1e-9);
         assert!(fast.len() > 8_000 && fast.len() < 14_000, "{}", fast.len());
     }
+
+    #[test]
+    fn player_render_drain_clamps_to_playback_window() {
+        let (_dir, player) = player_with(&vec![0.4; 16_000 * 3], &vec![0.0; 16_000 * 3]);
+        player.set_playback_range(Some((1.0, 1.75)));
+        player.play_in_state();
+        let rendered = drain(&player, 1_000);
+        assert_eq!(rendered.len(), 12_000);
+        assert!(!player.is_playing());
+        assert!((player.position() - 1.75).abs() < 1e-9);
+    }
 }

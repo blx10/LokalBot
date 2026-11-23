@@ -98,16 +98,20 @@ impl Models {
                 .is_ready()
     }
 
+    pub fn multi_stt_config(&self) -> Option<crate::speech::MultiSttConfig> {
+        let cfg = crate::speech::MultiSttConfig::from_settings(&self.shared.settings());
+        cfg.enabled.then_some(cfg)
+    }
+
     pub fn meeting_requirements(&self, summarize: bool) -> Vec<String> {
         let settings = self.shared.settings();
-        let mut ids = Self::transcription_ids(&settings);
-        ids.extend(lokalbot_speech::models::supporting_ids(
-            settings.multi_speaker_diarization,
-        ));
-        if summarize {
-            ids.extend(self.think_requirements());
-        }
-        ids
+        let multi = self.multi_stt_config();
+        let reqs = self.meeting_requirements_with(
+            summarize,
+            multi.as_ref(),
+            crate::post_correction::local_llama_server_disabled(&settings),
+        );
+        reqs.model_ids
     }
 
     pub fn think_requirements(&self) -> Vec<String> {
@@ -123,7 +127,6 @@ impl Models {
         }
     }
 
-    #[allow(dead_code)]
     pub fn multi_stt_requirements(config: &crate::speech::MultiSttConfig) -> Vec<String> {
         let mut ids = vec![
             config.primary.id.clone(),
@@ -136,7 +139,6 @@ impl Models {
         ids
     }
 
-    #[allow(dead_code)]
     pub fn speech_requirements(
         multi_stt: Option<&crate::speech::MultiSttConfig>,
         single_model_id: &str,
@@ -154,7 +156,6 @@ impl Models {
         ids
     }
 
-    #[allow(dead_code)]
     pub fn think_requirements_with(&self, disable_local_llama_server: bool) -> Vec<String> {
         if disable_local_llama_server {
             Vec::new()
@@ -163,7 +164,6 @@ impl Models {
         }
     }
 
-    #[allow(dead_code)]
     pub fn meeting_requirements_with(
         &self,
         summarize: bool,
@@ -512,10 +512,7 @@ impl Models {
             }
             ModelRef::Speech(model) => {
                 if !model.is_downloadable() {
-                    anyhow::bail!(
-                        "{} is bundled and cannot be downloaded",
-                        model.display_name
-                    );
+                    anyhow::bail!("{} is bundled and cannot be downloaded", model.display_name);
                 }
                 let info = lokalbot_speech::models::download_info(model);
                 let spec = lokalbot_ai::download::DownloadSpec {
@@ -916,5 +913,25 @@ mod tests {
         let models = Models::new(shared);
         let err = models.download_blocking("whisper-turbo").unwrap_err();
         assert!(err.to_string().contains("bundled"));
+    }
+
+    #[test]
+    fn think_requirements_honor_typed_disable_local_llama_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let library =
+            lokalbot_core::Library::open(lokalbot_core::LibraryPaths::new(dir.path())).unwrap();
+        let mut settings = lokalbot_core::Settings {
+            summarizer_backend: SummarizerBackend::BuiltIn,
+            disable_local_llama_server: false,
+            ..Default::default()
+        };
+        let shared_enabled = Shared::for_tests(library.clone(), settings.clone(), |_| {});
+        let models_enabled = Models::new(shared_enabled);
+        assert!(!models_enabled.think_requirements().is_empty());
+
+        settings.disable_local_llama_server = true;
+        let shared_disabled = Shared::for_tests(library, settings, |_| {});
+        let models_disabled = Models::new(shared_disabled);
+        assert!(models_disabled.think_requirements().is_empty());
     }
 }

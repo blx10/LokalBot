@@ -314,8 +314,14 @@ impl ConfigProfile {
     pub fn load_from_path(path: &Path) -> Result<Self> {
         let raw = std::fs::read_to_string(path)
             .with_context(|| format!("could not read config file {}", path.display()))?;
-        let profile: Self = toml::from_str(&raw)
+        let mut profile: Self = toml::from_str(&raw)
             .with_context(|| format!("could not parse TOML in {}", path.display()))?;
+        if is_masked_api_key(&profile.transcription.post_correction.api_key) {
+            profile.transcription.post_correction.api_key.clear();
+        }
+        if is_masked_api_key(&profile.think.api_key) {
+            profile.think.api_key.clear();
+        }
         profile.validate()?;
         Ok(profile)
     }
@@ -830,6 +836,18 @@ disable_local_llama_server = true
             profile.transcription.models.fast_helper.id,
             "zipformer-oayk"
         );
+        assert!(profile.think.disable_local_llama_server);
+    }
+
+    #[test]
+    fn load_from_path_strips_masked_api_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("masked.toml");
+        let toml = sample_toml(API_KEY_MASK, API_KEY_MASK);
+        std::fs::write(&path, toml).unwrap();
+        let loaded = ConfigProfile::load_from_path(&path).unwrap();
+        assert!(loaded.transcription.post_correction.api_key.is_empty());
+        assert!(loaded.think.api_key.is_empty());
     }
 
     #[test]

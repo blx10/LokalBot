@@ -5,8 +5,8 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use lokalbot_ai::remote_transcription::Client;
-use lokalbot_core::{LibraryPaths, Settings};
 use lokalbot_core::remote_transcription::{RemoteTranscription, request_key};
+use lokalbot_core::{LibraryPaths, Settings};
 use parking_lot::Mutex;
 
 use lokalbot_speech::models::{
@@ -14,8 +14,8 @@ use lokalbot_speech::models::{
     is_remote,
 };
 use lokalbot_speech::{
-    ComputeDevice, ModelSlotConfig, MultiSttProgress, MultiSttResult, MultiSttRunner,
-    SpeechServer, TranscribeOptions, Transcriber,
+    ComputeDevice, ModelSlotConfig, MultiSttProgress, MultiSttResult, MultiSttRunner, SpeechServer,
+    TranscribeOptions, Transcriber,
 };
 
 use crate::Shared;
@@ -29,6 +29,14 @@ pub enum ExecutionDevice {
 }
 
 impl ExecutionDevice {
+    pub fn from_config_str(raw: &str) -> Self {
+        if raw.trim().eq_ignore_ascii_case("cpu") {
+            Self::Cpu
+        } else {
+            Self::IGpu
+        }
+    }
+
     pub fn to_speech(self) -> ComputeDevice {
         match self {
             Self::IGpu => ComputeDevice::Igpu,
@@ -94,6 +102,57 @@ impl MultiSttConfig {
         }
     }
 
+    pub fn from_settings(settings: &Settings) -> Self {
+        let legacy_mode = settings
+            .other
+            .get("transcription")
+            .and_then(|tx| tx.get("mode"))
+            .and_then(|v| v.as_str())
+            .is_some_and(|m| m.trim().eq_ignore_ascii_case("asymmetric_multi_stt"));
+        let legacy_multi = settings
+            .other
+            .get("multiStt")
+            .and_then(|m| m.get("enabled"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let enabled = settings.transcription_mode
+            == lokalbot_core::config_profile::TranscriptionMode::AsymmetricMultiStt
+            || legacy_mode
+            || legacy_multi;
+        let slot = |cfg: &lokalbot_core::config_profile::SttModelSlot, fallback: &str| {
+            let trimmed = cfg.id.trim();
+            SttModelSlot {
+                id: if trimmed.is_empty() {
+                    fallback.to_string()
+                } else {
+                    trimmed.to_string()
+                },
+                device: ExecutionDevice::from_config_str(&cfg.device),
+            }
+        };
+        let language = Some(settings.transcription_language.trim().to_string())
+            .filter(|l| !l.is_empty() && !l.eq_ignore_ascii_case("auto"));
+        Self {
+            enabled,
+            primary: slot(&settings.transcription_models.primary, WHISPER_TURBO_MODEL),
+            tr_backup: slot(
+                &settings.transcription_models.tr_backup,
+                WHISPER_TURBO_TR_KHAN_MODEL,
+            ),
+            fast_helper: slot(
+                &settings.transcription_models.fast_helper,
+                ZIPFORMER_OAYK_MODEL,
+            ),
+            language,
+            cpu_threads: settings.transcription_cpu_threads.max(1),
+            auto_fallback_to_cpu: settings.transcription_auto_fallback_to_cpu,
+            diarize: settings.multi_speaker_diarization,
+            microphone_is_user: settings.microphone_is_user,
+            models_dir: None,
+            whisper_server_bin: None,
+        }
+    }
+
     pub fn to_speech_config(&self) -> lokalbot_speech::MultiSttConfig {
         lokalbot_speech::MultiSttConfig {
             primary: ModelSlotConfig {
@@ -150,7 +209,7 @@ fn server_client(settings: &Settings) -> Result<Client> {
         &settings.remote_transcription_base_url,
         &settings.openai_base_url,
         &crate::secrets::remote_transcription_api_key().unwrap_or_default(),
-        || crate::effective_openai_api_key(settings).unwrap_or_default(),
+        || crate::secrets::resolve_openai_api_key(settings).unwrap_or_default(),
     );
     Ok(Client::new(
         &RemoteTranscription::from_settings(settings),
@@ -561,5 +620,31 @@ mod tests {
             .unwrap();
         assert!(res.segments.is_empty());
         assert!(!shared.speech.is_loaded(MODEL));
+    }
+
+    #[test]
+    fn multi_stt_config_from_settings_reads_typed_fields_and_legacy_fallback() {
+        let settings = Settings {
+            transcription_mode:
+                lokalbot_core::config_profile::TranscriptionMode::AsymmetricMultiStt,
+            transcription_language: "tr".into(),
+            transcription_cpu_threads: 4,
+            transcription_auto_fallback_to_cpu: false,
+            ..Default::default()
+        };
+        let cfg = MultiSttConfig::from_settings(&settings);
+        assert!(cfg.enabled);
+        assert_eq!(cfg.language.as_deref(), Some("tr"));
+        assert_eq!(cfg.cpu_threads, 4);
+        assert!(!cfg.auto_fallback_to_cpu);
+        assert_eq!(cfg.primary.device, ExecutionDevice::IGpu);
+        assert_eq!(cfg.fast_helper.device, ExecutionDevice::Cpu);
+
+        let mut legacy = Settings::default();
+        legacy.other.insert(
+            "transcription".into(),
+            serde_json::json!({ "mode": "asymmetric_multi_stt" }),
+        );
+        assert!(MultiSttConfig::from_settings(&legacy).enabled);
     }
 }

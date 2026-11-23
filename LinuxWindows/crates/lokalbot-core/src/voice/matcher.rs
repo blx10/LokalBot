@@ -244,15 +244,15 @@ pub fn can_enroll(samples: &[VoiceSample]) -> bool {
         || samples
             .iter()
             .any(|s| s.resolved_source() != first.resolved_source())
-        || samples.iter().map(|s| s.range.duration()).sum::<f64>() < call::MINIMUM_ENROLLMENT_SECONDS
+        || samples.iter().map(|s| s.range.duration()).sum::<f64>()
+            < call::MINIMUM_ENROLLMENT_SECONDS
     {
         return false;
     }
     for (index, sample) in samples.iter().enumerate() {
         for other in &samples[index + 1..] {
             if sample.range.overlap(&other.range) > 0.0
-                || (!is_call
-                    && cosine(&sample.vector, &other.vector) < call::MINIMUM_CONSISTENCY)
+                || (!is_call && cosine(&sample.vector, &other.vector) < call::MINIMUM_CONSISTENCY)
             {
                 return false;
             }
@@ -354,12 +354,14 @@ fn call_matches(
             if let Some(remembered) = call_voiceprint(profile) {
                 let score = cosine(&query.vector, &remembered.vector);
                 (score >= call::SUGGESTED_SCORE).then_some((profile, score, score, false))
-            } else if allow_cross_channel
-                && let Some(fallback) = mic_voiceprint(profile)
-            {
+            } else if allow_cross_channel && let Some(fallback) = mic_voiceprint(profile) {
                 let score = cosine(&query.vector, &fallback.vector);
-                (score >= call::CROSS_CHANNEL_SUGGESTED_SCORE)
-                    .then_some((profile, score, score - 0.05, true))
+                (score >= call::CROSS_CHANNEL_SUGGESTED_SCORE).then_some((
+                    profile,
+                    score,
+                    score - 0.05,
+                    true,
+                ))
             } else {
                 None
             }

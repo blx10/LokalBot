@@ -261,16 +261,16 @@ pub fn list_json(session: &Session, meetings: &[Meeting], include_summary: bool)
         .map(|(m, (markdown, summary))| ListEntry {
             id: short_id(m),
             uuid: m.id.hyphenated().to_string(),
-            title: m.title.clone(),
+            title: lokalbot_core::text::redact(&m.title),
             date: iso8601(m.started_at),
             duration_seconds: duration(m).unwrap_or(0.0),
-            app_source: m.app_name.clone(),
+            app_source: lokalbot_core::text::redact(&m.app_name),
             has_system_track: m.has_system_track,
             has_summary: markdown.is_some()
                 || (!include_summary && has_file(m, lokalbot_core::library::SUMMARY_FILE)),
             has_transcript: has_file(m, lokalbot_core::library::TRANSCRIPT_MD_FILE),
             summary_truncated: summary.as_ref().and_then(|(_, cut)| cut.then_some(true)),
-            summary: summary.map(|(text, _)| text),
+            summary: summary.map(|(text, _)| lokalbot_core::text::redact(&text)),
             sample: m.is_sample().then_some(true),
         })
         .collect();
@@ -288,8 +288,8 @@ pub fn list_table(session: &Session, meetings: &[Meeting], include_summary: bool
                 short_id(m),
                 short_date(m.started_at),
                 duration_label(m),
-                m.app_name.clone(),
-                m.title.clone(),
+                lokalbot_core::text::redact(&m.app_name),
+                lokalbot_core::text::redact(&m.title),
             ]
         })
         .collect();
@@ -301,7 +301,12 @@ pub fn list_table(session: &Session, meetings: &[Meeting], include_summary: bool
     let mut sections = vec![table];
     for (m, summary) in meetings.iter().zip(list_summaries(&markdown)) {
         if let Some((text, _)) = summary {
-            sections.push(format!("── {} · {}\n{text}", short_id(m), m.title));
+            sections.push(format!(
+                "── {} · {}\n{}",
+                short_id(m),
+                lokalbot_core::text::redact(&m.title),
+                lokalbot_core::text::redact(&text)
+            ));
         }
     }
     sections.join("\n\n")
@@ -652,5 +657,16 @@ mod tests {
             parsed["transcript"],
             "**[00:00:01] Me:** Transcript with [REDACTED_KEY]"
         );
+
+        let list_j = list_json(&session, &[meeting.clone()], true);
+        assert!(!list_j.contains("987654"));
+        let list_parsed: Vec<serde_json::Value> = serde_json::from_str(&list_j).unwrap();
+        assert_eq!(list_parsed[0]["title"], "Sync [REDACTED_KEY]");
+        assert_eq!(list_parsed[0]["app_source"], "Zoom [REDACTED_KEY]");
+        assert_eq!(list_parsed[0]["summary"], "Summary with [REDACTED_KEY]");
+
+        let list_t = list_table(&session, &[meeting], true);
+        assert!(!list_t.contains("987654"));
+        assert!(list_t.contains("[REDACTED_KEY]"));
     }
 }

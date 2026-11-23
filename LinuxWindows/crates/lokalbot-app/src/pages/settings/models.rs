@@ -1238,8 +1238,8 @@ impl SettingsPage {
                         .small()
                         .label(lokalbot_i18n::tr("Save connection"))
                         .disabled(!has_changes)
-                        .on_click(move |_, _, cx| {
-                            save_page.update(cx, |page, cx| page.save_connection(cx))
+                        .on_click(move |_, window, cx| {
+                            save_page.update(cx, |page, cx| page.save_connection(window, cx))
                         }),
                 )
                 .when_some(self.models.saved.clone(), |this, saved| {
@@ -1581,15 +1581,16 @@ impl SettingsPage {
         .detach();
     }
 
-    fn save_connection(&mut self, cx: &mut Context<Self>) {
+    fn save_connection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let (url, model) = self.models.draft(cx);
         let ollama = self.models.connection == SummarizerBackend::Ollama;
         let raw_cfg_key = self.models.think_config_key.read(cx).value().to_string();
         let dirty = self.models.think_config_key_dirty;
         self.models.think_config_key_dirty = false;
+        let mut restored_key = String::new();
         self.data.update(cx, |data, cx| {
             data.update_config_and_settings(
-                move |profile, s| {
+                |profile, s| {
                     if ollama {
                         s.ollama_base_url = url;
                         s.ollama_model = model;
@@ -1601,6 +1602,7 @@ impl SettingsPage {
                             &raw_cfg_key,
                             dirty,
                         );
+                        restored_key = resolved.clone();
                         profile.think.api_key = resolved.clone();
                         s.think_api_key = resolved;
                     }
@@ -1609,6 +1611,11 @@ impl SettingsPage {
                 cx,
             );
         });
+        if !ollama && !dirty && raw_cfg_key.trim().is_empty() && !restored_key.is_empty() {
+            self.models.think_config_key.update(cx, |field, cx| {
+                field.set_value(lokalbot_core::text::API_KEY_MASK, window, cx);
+            });
+        }
         self.models.saved = Some(lokalbot_i18n::tr("Saved").into());
         cx.notify();
     }

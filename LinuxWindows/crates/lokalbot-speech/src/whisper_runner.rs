@@ -81,9 +81,7 @@ enum RunnerBackend {
         server: Mutex<Option<ServerProcess>>,
     },
     #[cfg(test)]
-    MockHttp {
-        base_url: String,
-    },
+    MockHttp { base_url: String },
 }
 
 pub struct WhisperRunner {
@@ -136,10 +134,7 @@ impl WhisperRunner {
     }
 
     #[cfg(test)]
-    pub(crate) fn with_mock_url(
-        base_url: impl Into<String>,
-        provenance: DeviceProvenance,
-    ) -> Self {
+    pub(crate) fn with_mock_url(base_url: impl Into<String>, provenance: DeviceProvenance) -> Self {
         Self {
             agent: loopback_agent(Duration::from_secs(10)),
             provenance: Mutex::new(provenance),
@@ -558,8 +553,10 @@ fn build_multipart(boundary: &str, wav: &[u8], language: Option<&str>) -> Vec<u8
     let mut body = Vec::with_capacity(wav.len() + 512);
     for (name, value) in fields {
         body.extend_from_slice(
-            format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n")
-                .as_bytes(),
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n"
+            )
+            .as_bytes(),
         );
     }
     body.extend_from_slice(
@@ -605,7 +602,10 @@ fn post_inference(
     let body = build_multipart(&boundary, wav, language);
     let mut response = agent
         .post(url)
-        .header("Content-Type", &format!("multipart/form-data; boundary={boundary}"))
+        .header(
+            "Content-Type",
+            &format!("multipart/form-data; boundary={boundary}"),
+        )
         .header("Accept", "application/json")
         .send(&body[..])
         .with_context(|| format!("whisper-server POST {url} failed"))?;

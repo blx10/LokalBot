@@ -1371,4 +1371,51 @@ mod tests {
                 .is_err()
         );
     }
+
+    #[test]
+    fn set_meeting_boundaries_persists_range_and_clears_on_restore() {
+        let dir = tempfile::tempdir().unwrap();
+        let library = Library::open(LibraryPaths::new(dir.path())).unwrap();
+        let started = crate::time::now_seconds() - chrono::Duration::seconds(20);
+        let mut meeting = library
+            .create_meeting("Boundary Persist", "Zoom", started)
+            .unwrap();
+        meeting.ended_at = Some(started + chrono::Duration::seconds(12));
+        meeting.recorded_duration = Some(12.0);
+        library.save_meeting(&meeting).unwrap();
+
+        let trimmed = library
+            .set_meeting_boundaries(
+                &meeting,
+                ContentRange {
+                    start: 3.0,
+                    end: 9.0,
+                },
+            )
+            .unwrap();
+        let reloaded = library.meeting(meeting.id).unwrap().unwrap();
+        assert_eq!(
+            reloaded.content_range,
+            Some(ContentRange {
+                start: 3.0,
+                end: 9.0
+            })
+        );
+        assert_eq!(trimmed.content_range, reloaded.content_range);
+
+        let restored = library
+            .set_meeting_boundaries(
+                &reloaded,
+                ContentRange {
+                    start: 0.01,
+                    end: 11.97,
+                },
+            )
+            .unwrap();
+        assert_eq!(restored.content_range, None);
+        assert_eq!(
+            library.meeting(meeting.id).unwrap().unwrap().content_range,
+            None
+        );
+    }
 }

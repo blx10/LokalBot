@@ -873,4 +873,143 @@ mod tests {
         assert_eq!(restored.content_range, None);
         assert_eq!(restored.content_range_source, None);
     }
+
+    #[test]
+    fn set_meeting_boundaries_trims_reindexes_and_restores_full_recording() {
+        let dir = tempfile::tempdir().unwrap();
+        let library = Library::open(LibraryPaths::new(dir.path().join("library"))).unwrap();
+        let started = Utc::now() - Duration::minutes(5);
+        let mut meeting = library
+            .create_meeting("Engine Boundaries", "Zoom", started)
+            .unwrap();
+        let folder = library.meeting_dir(&meeting);
+        write_tone(&folder.join("mic.wav"), 5.0, 16_000, 1);
+        meeting.ended_at = Some(started + Duration::seconds(5));
+        meeting.recorded_duration = Some(5.0);
+        library.save_meeting(&meeting).unwrap();
+
+        let trimmed = set_meeting_boundaries(
+            &library,
+            &meeting,
+            ContentRange {
+                start: 1.0,
+                end: 4.0,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            trimmed.content_range,
+            Some(ContentRange {
+                start: 1.0,
+                end: 4.0
+            })
+        );
+        let restored = set_meeting_boundaries(
+            &library,
+            &trimmed,
+            ContentRange {
+                start: 0.02,
+                end: 4.98,
+            },
+        )
+        .unwrap();
+        assert_eq!(restored.content_range, None);
+    }
+
+    #[test]
+    fn extract_meeting_from_selection_preserves_notes_and_parent_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let library = Library::open(LibraryPaths::new(dir.path().join("library"))).unwrap();
+        let started = Utc::now() - Duration::minutes(4);
+        let mut source = library
+            .create_meeting("Selection Source", "Zoom", started)
+            .unwrap();
+        let folder = library.meeting_dir(&source);
+        write_tone(&folder.join("mic.wav"), 4.0, 16_000, 1);
+        source.ended_at = Some(started + Duration::seconds(4));
+        source.recorded_duration = Some(4.0);
+        library.save_meeting(&source).unwrap();
+        library.save_notes(&source, "Follow up with QA").unwrap();
+
+        let extracted = extract_meeting_from_selection(
+            &library,
+            &source,
+            ContentRange {
+                start: 1.0,
+                end: 3.0,
+            },
+        )
+        .unwrap();
+        assert_eq!(extracted.extracted_from_meeting_id, Some(source.id));
+        assert!((extracted.recorded_duration.unwrap() - 2.0).abs() < 0.05);
+        assert_eq!(library.notes(&extracted).unwrap(), "Follow up with QA");
+    }
+
+    #[test]
+    fn extract_meeting_rejects_invalid_range_and_missing_audio() {
+        let dir = tempfile::tempdir().unwrap();
+        let library = Library::open(LibraryPaths::new(dir.path().join("library"))).unwrap();
+        let started = Utc::now() - Duration::minutes(3);
+        let mut no_audio = library.create_meeting("No Audio", "Zoom", started).unwrap();
+        no_audio.ended_at = Some(started + Duration::seconds(5));
+        no_audio.recorded_duration = Some(5.0);
+        library.save_meeting(&no_audio).unwrap();
+        assert!(matches!(
+            extract_meeting_from_selection(
+                &library,
+                &no_audio,
+                ContentRange {
+                    start: 1.0,
+                    end: 3.0
+                }
+            ),
+            Err(ExtractError::NoAudioTracks)
+        ));
+
+        let mut with_audio = library
+            .create_meeting("With Audio", "Zoom", started)
+            .unwrap();
+        write_tone(
+            &library.meeting_dir(&with_audio).join("mic.wav"),
+            3.0,
+            16_000,
+            1,
+        );
+        with_audio.ended_at = Some(started + Duration::seconds(3));
+        with_audio.recorded_duration = Some(3.0);
+        library.save_meeting(&with_audio).unwrap();
+        assert!(matches!(
+            extract_meeting_from_selection(
+                &library,
+                &with_audio,
+                ContentRange {
+                    start: 2.0,
+                    end: 1.0
+                }
+            ),
+            Err(ExtractError::InvalidRange)
+        ));
+        assert!(matches!(
+            extract_meeting_from_selection(
+                &library,
+                &with_audio,
+                ContentRange {
+                    start: 1.0,
+                    end: 1.1
+                }
+            ),
+            Err(ExtractError::InvalidRange)
+        ));
+        assert!(matches!(
+            extract_meeting_from_selection(
+                &library,
+                &with_audio,
+                ContentRange {
+                    start: 3.0,
+                    end: 5.0
+                }
+            ),
+            Err(ExtractError::InvalidRange)
+        ));
+    }
 }

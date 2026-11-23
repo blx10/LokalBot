@@ -187,7 +187,13 @@ impl RememberedPeople {
         self.perform(move |memory| memory.forget_profile(id), window, cx);
     }
 
-    fn merge(&mut self, source_id: Uuid, target_id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+    fn merge(
+        &mut self,
+        source_id: Uuid,
+        target_id: Uuid,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.perform(
             move |memory| memory.merge_profiles(source_id, target_id),
             window,
@@ -261,10 +267,8 @@ impl RememberedPeople {
                                     .await;
                                 let active = this
                                     .update(cx, |this, cx| {
-                                        let still_playing = this
-                                            .preview
-                                            .as_ref()
-                                            .is_some_and(|p| {
+                                        let still_playing =
+                                            this.preview.as_ref().is_some_and(|p| {
                                                 p.decision_id == decision_id
                                                     && p.player.is_playing()
                                             });
@@ -391,7 +395,7 @@ impl RememberedPeople {
         let is_merging = self.merging_source == Some(id);
         let is_expanded = self.expanded.contains(&id);
         let mut contributions = person.profile.contributions.clone();
-        contributions.sort_by(|a, b| b.confirmed_at.cmp(&a.confirmed_at));
+        contributions.sort_by_key(|a| std::cmp::Reverse(a.confirmed_at));
         v_flex()
             .gap(px(6.))
             .p(px(10.))

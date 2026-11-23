@@ -54,6 +54,10 @@ fn normalize_camel_keys(value: Value) -> Value {
 }
 
 pub fn think_api_key(settings: &Settings) -> Option<String> {
+    let typed = settings.think_api_key.trim();
+    if !typed.is_empty() {
+        return Some(typed.to_string());
+    }
     non_empty_str(settings.other.get("thinkApiKey"))
         .or_else(|| non_empty_str(settings.other.get("think_api_key")))
         .or_else(|| {
@@ -83,17 +87,22 @@ pub fn set_think_api_key(settings: &mut Settings, key: Option<&str>) {
     remove_nested_keys(settings, "think", &["apiKey", "api_key"]);
     match key.map(str::trim).filter(|k| !k.is_empty()) {
         Some(k) => {
+            settings.think_api_key = k.to_string();
             settings
                 .other
                 .insert("thinkApiKey".into(), Value::String(k.to_string()));
         }
         None => {
+            settings.think_api_key.clear();
             settings.other.remove("thinkApiKey");
         }
     }
 }
 
 pub fn local_llama_server_disabled(settings: &Settings) -> bool {
+    if settings.disable_local_llama_server {
+        return true;
+    }
     settings
         .other
         .get("disableLocalLlamaServer")
@@ -120,6 +129,7 @@ pub fn local_llama_server_disabled(settings: &Settings) -> bool {
 }
 
 pub fn set_local_llama_server_disabled(settings: &mut Settings, disabled: bool) {
+    settings.disable_local_llama_server = disabled;
     settings.other.remove("disable_local_llama_server");
     remove_nested_keys(
         settings,
@@ -136,7 +146,7 @@ pub fn set_local_llama_server_disabled(settings: &mut Settings, disabled: bool) 
 }
 
 pub fn post_correction_config(settings: &Settings) -> Option<PostCorrectionConfig> {
-    let raw = settings
+    if let Some(raw) = settings
         .other
         .get("postCorrection")
         .or_else(|| settings.other.get("post_correction"))
@@ -145,9 +155,50 @@ pub fn post_correction_config(settings: &Settings) -> Option<PostCorrectionConfi
                 tx.get("postCorrection")
                     .or_else(|| tx.get("post_correction"))
             })
-        })?;
-    let normalized = normalize_camel_keys(raw.clone());
-    serde_json::from_value(normalized).ok()
+        })
+    {
+        let normalized = normalize_camel_keys(raw.clone());
+        if let Ok(mut cfg) = serde_json::from_value::<PostCorrectionConfig>(normalized) {
+            if cfg.api_key.trim().is_empty() && !settings.post_correction_api_key.trim().is_empty()
+            {
+                cfg.api_key = settings.post_correction_api_key.trim().to_string();
+            }
+            return Some(cfg);
+        }
+    }
+    if settings.post_correction_enabled
+        || !settings.post_correction_base_url.trim().is_empty()
+        || !settings.post_correction_api_key.trim().is_empty()
+    {
+        let defaults = PostCorrectionConfig::default();
+        return Some(PostCorrectionConfig {
+            enabled: settings.post_correction_enabled,
+            base_url: settings.post_correction_base_url.trim().to_string(),
+            api_key: settings.post_correction_api_key.trim().to_string(),
+            primary_judge_model: if settings
+                .post_correction_primary_judge_model
+                .trim()
+                .is_empty()
+            {
+                defaults.primary_judge_model
+            } else {
+                settings
+                    .post_correction_primary_judge_model
+                    .trim()
+                    .to_string()
+            },
+            support_critic_models: if settings.post_correction_support_critic_models.is_empty() {
+                defaults.support_critic_models
+            } else {
+                settings.post_correction_support_critic_models.clone()
+            },
+            segments_per_batch: settings.post_correction_segments_per_batch.max(1),
+            request_timeout_sec: settings.post_correction_request_timeout_sec.max(1),
+            max_concurrent_batches: settings.post_correction_max_concurrent_batches.max(1),
+            continue_on_critic_failure: settings.post_correction_continue_on_critic_failure,
+        });
+    }
+    None
 }
 
 pub fn set_post_correction_config(settings: &mut Settings, config: Option<&PostCorrectionConfig>) {
@@ -159,11 +210,23 @@ pub fn set_post_correction_config(settings: &mut Settings, config: Option<&PostC
     );
     match config {
         Some(cfg) => {
+            settings.post_correction_enabled = cfg.enabled;
+            settings.post_correction_base_url = cfg.base_url.clone();
+            settings.post_correction_api_key = cfg.api_key.clone();
+            settings.post_correction_primary_judge_model = cfg.primary_judge_model.clone();
+            settings.post_correction_support_critic_models = cfg.support_critic_models.clone();
+            settings.post_correction_segments_per_batch = cfg.segments_per_batch.max(1);
+            settings.post_correction_request_timeout_sec = cfg.request_timeout_sec.max(1);
+            settings.post_correction_max_concurrent_batches = cfg.max_concurrent_batches.max(1);
+            settings.post_correction_continue_on_critic_failure = cfg.continue_on_critic_failure;
             if let Ok(val) = serde_json::to_value(cfg) {
                 settings.other.insert("postCorrection".into(), val);
             }
         }
         None => {
+            settings.post_correction_enabled = false;
+            settings.post_correction_base_url.clear();
+            settings.post_correction_api_key.clear();
             settings.other.remove("postCorrection");
         }
     }
@@ -198,10 +261,11 @@ pub fn save_audit_log(settings: &Settings) -> bool {
                         .or_else(|| pc.get("save_audit_log").and_then(Value::as_bool))
                 })
         })
-        .unwrap_or(false)
+        .unwrap_or(settings.transcription_save_audit_log)
 }
 
 pub fn set_save_audit_log(settings: &mut Settings, save: bool) {
+    settings.transcription_save_audit_log = save;
     settings.other.remove("save_audit_log");
     remove_nested_keys(
         settings,
@@ -240,6 +304,24 @@ pub fn segments_from_transcript(transcript: &Transcript) -> Vec<MultiSttSegment>
             primary_text: segment.text.clone(),
             tr_backup_text: String::new(),
             fast_helper_text: String::new(),
+        })
+        .collect()
+}
+
+pub fn segments_from_multi_stt(
+    segments: &[lokalbot_speech::MultiSttSegment],
+) -> Vec<MultiSttSegment> {
+    segments
+        .iter()
+        .enumerate()
+        .map(|(index, segment)| MultiSttSegment {
+            segment_id: index + 1,
+            start: segment.start,
+            end: segment.end,
+            speaker: segment.speaker.clone(),
+            primary_text: segment.primary.clone(),
+            tr_backup_text: segment.tr_backup.clone(),
+            fast_helper_text: segment.fast_helper.clone(),
         })
         .collect()
 }
@@ -309,6 +391,9 @@ pub(crate) fn correct_transcript_with_keyring(
         return Ok((transcript, false));
     }
     on_start();
+    if !config.api_key.trim().is_empty() {
+        lokalbot_core::text::register_redacted_secrets([config.api_key.as_str()]);
+    }
 
     let vocab = vocabulary_terms(meeting, library, settings);
     let corrector = PostCorrector::new(config, settings.approved_remote_inference_origins.clone())?
@@ -745,5 +830,126 @@ mod tests {
         set_think_api_key(&mut settings, Some("sk-new-top"));
         set_think_api_key(&mut settings, Some("   "));
         assert_eq!(think_api_key(&settings), None);
+    }
+
+    #[test]
+    fn typed_settings_and_config_profile_drive_post_correction_and_think() {
+        let server = MockServer::start(|req| {
+            let body = req.json();
+            match body["model"].as_str().unwrap_or("") {
+                "gemma-4-31B-it" => chat_json(
+                    r#"{"candidates":[{"segment_id":1,"wrong_in_primary":"lokal bot","suggested_fix":"LokalBot","supported_by":"zipformer-oayk","reason":"brand"}]}"#,
+                ),
+                "gpt-oss-120b" => chat_json(r#"{"candidates":[]}"#),
+                "Qwen3.8-27B" => {
+                    chat_json(r#"{"segments":[{"segment_id":1,"text":"LokalBot hazır"}]}"#)
+                }
+                _ => (404, json!({"error": "unknown"})),
+            }
+        });
+
+        let toml_text = format!(
+            r#"
+schema_version = 1
+
+[deployment]
+auto_approve_configured_origins = true
+skip_onboarding_wizard = true
+
+[transcription]
+mode = "asymmetric_multi_stt"
+language = "tr"
+live_preview_during_meeting = false
+save_audit_log = true
+cpu_threads = 6
+auto_fallback_to_cpu = true
+
+[transcription.post_correction]
+enabled = true
+base_url = "{url}"
+api_key = "sk-typed-pc-key"
+primary_judge_model = "Qwen3.8-27B"
+support_critic_models = ["gemma-4-31B-it", "gpt-oss-120b"]
+segments_per_batch = 5
+request_timeout_sec = 30
+max_concurrent_batches = 2
+continue_on_critic_failure = true
+
+[think]
+backend = "openai_compatible"
+base_url = "{url}"
+api_key = "sk-typed-think-key"
+model = "Qwen3.8-27B"
+disable_local_llama_server = true
+"#,
+            url = server.url("/v1")
+        );
+
+        let profile =
+            lokalbot_core::config_profile::ConfigProfile::import_toml(&toml_text, None).unwrap();
+        let mut settings = Settings::default();
+        profile.apply_to_settings(&mut settings);
+
+        assert_eq!(
+            think_api_key(&settings).as_deref(),
+            Some("sk-typed-think-key")
+        );
+        assert!(local_llama_server_disabled(&settings));
+        assert!(save_audit_log(&settings));
+        let pc_cfg = post_correction_config(&settings).unwrap();
+        assert!(pc_cfg.enabled);
+        assert_eq!(pc_cfg.api_key, "sk-typed-pc-key");
+
+        let dir = tempfile::tempdir().unwrap();
+        let library = Library::open(LibraryPaths::new(dir.path())).unwrap();
+        let meeting = library
+            .create_meeting("Typed Sync", "Teams", Utc::now())
+            .unwrap();
+        let transcript = Transcript {
+            segments: vec![Segment {
+                start: 0.0,
+                end: 2.0,
+                speaker: "Speaker 1".into(),
+                text: "lokal bot hazır".into(),
+                confidence: None,
+                timing_precision: None,
+                attribution: None,
+            }],
+            ..Default::default()
+        };
+        let multi = vec![lokalbot_speech::MultiSttSegment {
+            segment_id: 0,
+            start: 0.0,
+            end: 2.0,
+            speaker: "Speaker 1".into(),
+            primary: "lokal bot hazır".into(),
+            tr_backup: "Lokal bot hazır".into(),
+            fast_helper: "LokalBot hazır".into(),
+            timing_precision: None,
+            attribution: None,
+        }];
+        let mapped = segments_from_multi_stt(&multi);
+        assert_eq!(mapped[0].segment_id, 1);
+        assert_eq!(mapped[0].tr_backup_text, "Lokal bot hazır");
+        assert_eq!(mapped[0].fast_helper_text, "LokalBot hazır");
+
+        let (corrected, ran) = correct_transcript_with_keyring(
+            &meeting,
+            &library,
+            &settings,
+            transcript,
+            &mapped,
+            None,
+            &mut || {},
+        )
+        .unwrap();
+        assert!(ran);
+        assert_eq!(corrected.segments[0].text, "LokalBot hazır");
+        assert!(
+            library
+                .meeting_dir(&meeting)
+                .join(AUDIT_FILE_NAME)
+                .is_file()
+        );
     }
 }
