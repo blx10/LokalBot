@@ -29,9 +29,9 @@ use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Bounds, ClipboardItem, Context, Entity, FocusHandle,
-    Focusable as _, IntoElement, KeyBinding, ListAlignment, ListOffset, ListState,
-    ParentElement as _, Pixels, Render, SharedString, Styled as _, Subscription, Task, Window,
-    anchored, canvas, deferred, div, point, px,
+    Focusable as _, InteractiveElement as _, IntoElement, KeyBinding, ListAlignment, ListOffset,
+    ListState, ParentElement as _, Pixels, Render, SharedString, Styled as _, Subscription, Task,
+    Window, anchored, canvas, deferred, div, point, px,
 };
 use lokalbot_core::{ActionStatus, Meeting};
 use uuid::Uuid;
@@ -614,14 +614,16 @@ impl MeetingsPage {
 
     pub(crate) fn show_evidence(&mut self, seconds: f64, cx: &mut Context<Self>) {
         self.tab = MeetingTab::Transcript;
-        self.focus_at = Some(seconds);
+        let target = if let Some(doc) = self.doc.as_ref() {
+            let (start, end, raw) = self.active_bounds(doc.meeting.duration_seconds());
+            let (target, playhead) = playback::clamped_playhead(seconds, start, end, raw);
+            self.playhead = playhead;
+            target
+        } else {
+            seconds
+        };
+        self.focus_at = Some(target);
         self.pending_reveal = true;
-        if let Some(doc) = self.doc.as_ref() {
-            let duration = doc.meeting.duration_seconds();
-            if duration > 0. {
-                self.playhead = (seconds / duration).clamp(0., 1.) as f32;
-            }
-        }
         self.reveal_focus();
         cx.notify();
     }
@@ -1531,23 +1533,32 @@ impl Render for MeetingsPage {
         .absolute()
         .size_full();
 
-        h_flex().size_full().relative().child(measure).child({
-            let list = self.render_list_column(window, cx).into_any_element();
-            let detail = if live {
-                self.render_live(window, cx)
-            } else {
-                self.render_detail(window, cx)
-            };
-            ui::split::leading(
-                "LokalBot.meetings",
-                crate::theme::metric::CONTENT_COLUMN_WIDTH,
-                ui::split::LIST_RANGE,
-                list,
-                div().size_full().child(detail),
-                &self.data,
-                cx,
+        h_flex()
+            .size_full()
+            .relative()
+            .on_key_down(
+                cx.listener(|this, event: &gpui_kit::KeyDownEvent, window, cx| {
+                    this.handle_escape_selection(event, window, cx);
+                }),
             )
-        })
+            .child(measure)
+            .child({
+                let list = self.render_list_column(window, cx).into_any_element();
+                let detail = if live {
+                    self.render_live(window, cx)
+                } else {
+                    self.render_detail(window, cx)
+                };
+                ui::split::leading(
+                    "LokalBot.meetings",
+                    crate::theme::metric::CONTENT_COLUMN_WIDTH,
+                    ui::split::LIST_RANGE,
+                    list,
+                    div().size_full().child(detail),
+                    &self.data,
+                    cx,
+                )
+            })
     }
 }
 

@@ -1,7 +1,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui_kit::{AppContext as _, Context};
+use gpui_kit::component::WindowExt as _;
+use gpui_kit::{AppContext as _, Context, KeyDownEvent, Window};
 use lokalbot_audio::Player;
 use lokalbot_core::ContentRange;
 
@@ -84,7 +85,7 @@ impl MeetingsPage {
             self.waveform_drag = None;
             self.waveform_viewport = WaveformViewport::new(start, end);
         } else if self.waveform_bounds_for != Some((id, start, end)) {
-            self.waveform_selection.clear_pending();
+            self.waveform_selection.clear();
             self.waveform_viewport.update_bounds(start, end);
         }
         self.waveform_bounds_for = Some((id, start, end));
@@ -282,6 +283,7 @@ impl MeetingsPage {
             });
             return;
         }
+        self.pause_playback();
         self.selection_busy = true;
         cx.notify();
         let library = self.data.read(cx).library.clone();
@@ -371,6 +373,7 @@ impl MeetingsPage {
             });
             return;
         }
+        self.pause_playback();
         self.selection_busy = true;
         cx.notify();
         let library = self.data.read(cx).library.clone();
@@ -457,5 +460,58 @@ impl MeetingsPage {
         }
         cx.notify();
         self.playing
+    }
+
+    pub(super) fn handle_escape_selection(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if event.keystroke.key.as_str() == "escape"
+            && !window.has_active_dialog(cx)
+            && !self.find.open
+            && self.waveform_selection.has_any()
+        {
+            self.waveform_selection.clear();
+            cx.notify();
+            cx.stop_propagation();
+            return true;
+        }
+        false
+    }
+}
+
+pub(super) fn clamped_playhead(seconds: f64, start: f64, end: f64, raw: f64) -> (f64, f32) {
+    let lo = start.min(end);
+    let hi = start.max(end);
+    let target = if seconds.is_finite() {
+        seconds.clamp(lo, hi)
+    } else {
+        lo
+    };
+    let playhead = if raw > 0.0 && raw.is_finite() {
+        (target / raw).clamp(0.0, 1.0) as f32
+    } else {
+        0.0
+    };
+    (target, playhead)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clamped_playhead;
+
+    #[test]
+    fn clamped_playhead_clamps_to_active_bounds_and_normalizes_against_raw() {
+        assert_eq!(clamped_playhead(15.0, 10.0, 30.0, 60.0), (15.0, 0.25));
+        let (target, head) = clamped_playhead(2.0, 10.0, 30.0, 60.0);
+        assert_eq!(target, 10.0);
+        assert!((head - (10.0f32 / 60.0)).abs() < 1e-6);
+        assert_eq!(clamped_playhead(50.0, 10.0, 30.0, 60.0), (30.0, 0.5));
+        let (nan_target, nan_head) = clamped_playhead(f64::NAN, 10.0, 30.0, 60.0);
+        assert_eq!(nan_target, 10.0);
+        assert!((nan_head - (10.0f32 / 60.0)).abs() < 1e-6);
+        assert_eq!(clamped_playhead(5.0, 0.0, 0.0, 0.0), (0.0, 0.0));
     }
 }

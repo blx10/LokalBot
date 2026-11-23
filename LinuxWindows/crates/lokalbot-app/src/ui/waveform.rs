@@ -220,16 +220,16 @@ impl WaveformSelectionState {
         self.selection = None;
     }
 
-    pub fn clear_pending(&mut self) {
-        self.pending_start = None;
-    }
-
     pub fn selection(&self) -> Option<ContentRange> {
         self.selection
     }
 
     pub fn pending_start(&self) -> Option<f64> {
         self.pending_start
+    }
+
+    pub fn has_any(&self) -> bool {
+        self.selection.is_some() || self.pending_start.is_some()
     }
 }
 
@@ -250,6 +250,15 @@ struct Colors {
     scrollbar_thumb: Hsla,
 }
 
+pub type HoverHandler = Box<dyn Fn(Option<f32>, &mut Window, &mut App)>;
+pub type MouseDownHandler = Box<dyn Fn(f32, f32, bool, &mut Window, &mut App)>;
+pub type MouseMoveHandler = Box<dyn Fn(f32, f32, f32, bool, &mut Window, &mut App)>;
+pub type MouseUpHandler = Box<dyn Fn(f32, &mut Window, &mut App)>;
+pub type ZoomHandler = Box<dyn Fn(f64, f64, &mut Window, &mut App)>;
+pub type PanHandler = Box<dyn Fn(f64, &mut Window, &mut App)>;
+pub type ActionHandler = Box<dyn Fn(&mut Window, &mut App)>;
+pub type RangeActionHandler = Box<dyn Fn(ContentRange, &mut Window, &mut App)>;
+
 pub struct WaveformProps {
     pub peaks: Option<Arc<[f32]>>,
     pub current_time: f64,
@@ -260,22 +269,24 @@ pub struct WaveformProps {
     pub selection: WaveformSelectionState,
     pub height: Pixels,
     pub is_busy: bool,
+    pub is_dragging: bool,
+    pub allow_escape_clear: bool,
     pub has_trimmed_boundaries: bool,
     pub focus_handle: FocusHandle,
 }
 
 pub struct WaveformHandlers {
-    pub on_hover: Box<dyn Fn(Option<f32>, &mut Window, &mut App)>,
-    pub on_mouse_down: Box<dyn Fn(f32, f32, bool, &mut Window, &mut App)>,
-    pub on_mouse_move: Box<dyn Fn(f32, f32, f32, bool, &mut Window, &mut App)>,
-    pub on_mouse_up: Box<dyn Fn(f32, &mut Window, &mut App)>,
-    pub on_zoom: Box<dyn Fn(f64, f64, &mut Window, &mut App)>,
-    pub on_pan: Box<dyn Fn(f64, &mut Window, &mut App)>,
-    pub on_reset_zoom: Box<dyn Fn(&mut Window, &mut App)>,
-    pub on_clear_selection: Box<dyn Fn(&mut Window, &mut App)>,
-    pub on_trim_selection: Box<dyn Fn(ContentRange, &mut Window, &mut App)>,
-    pub on_extract_selection: Box<dyn Fn(ContentRange, &mut Window, &mut App)>,
-    pub on_restore_full: Box<dyn Fn(&mut Window, &mut App)>,
+    pub on_hover: HoverHandler,
+    pub on_mouse_down: MouseDownHandler,
+    pub on_mouse_move: MouseMoveHandler,
+    pub on_mouse_up: MouseUpHandler,
+    pub on_zoom: ZoomHandler,
+    pub on_pan: PanHandler,
+    pub on_reset_zoom: ActionHandler,
+    pub on_clear_selection: ActionHandler,
+    pub on_trim_selection: RangeActionHandler,
+    pub on_extract_selection: RangeActionHandler,
+    pub on_restore_full: ActionHandler,
 }
 
 fn fraction(bounds: Bounds<Pixels>, position: Point<Pixels>) -> f32 {
@@ -352,6 +363,8 @@ pub fn waveform<T: Into<ElementId>>(
     let on_extract_selection = Rc::new(handlers.on_extract_selection);
     let on_restore_full = Rc::new(handlers.on_restore_full);
 
+    let is_dragging = props.is_dragging;
+    let allow_escape_clear = props.allow_escape_clear;
     let zoom_badge = (viewport.zoom() > 1.01).then(|| {
         let label = format!("{}x", viewport.zoom().round() as u32);
         div()
@@ -372,16 +385,21 @@ pub fn waveform<T: Into<ElementId>>(
             .child(label)
             .tooltip(|window, cx| Tooltip::new(lokalbot_i18n::tr("Reset zoom")).build(window, cx))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-            .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_up(MouseButton::Left, move |_, _, cx| {
+                if !is_dragging {
+                    cx.stop_propagation();
+                }
+            })
             .on_click(move |_, window, cx| {
-                cx.stop_propagation();
-                on_reset_zoom(window, cx);
+                if !is_dragging {
+                    cx.stop_propagation();
+                    on_reset_zoom(window, cx);
+                }
             })
     });
 
     let current_selection = selection.selection();
-    let has_selection_or_pending =
-        current_selection.is_some() || selection.pending_start().is_some();
+    let has_selection_or_pending = selection.has_any();
     let is_busy = props.is_busy;
     let has_trimmed = props.has_trimmed_boundaries;
 
@@ -496,7 +514,10 @@ pub fn waveform<T: Into<ElementId>>(
             cx.stop_propagation();
         })
         .on_key_down(move |event: &KeyDownEvent, window, cx| {
-            if event.keystroke.key.as_str() == "escape" && has_selection_or_pending {
+            if event.keystroke.key.as_str() == "escape"
+                && allow_escape_clear
+                && has_selection_or_pending
+            {
                 key_clear(window, cx);
                 cx.stop_propagation();
             }
@@ -832,5 +853,20 @@ mod tests {
         state.clear();
         assert_eq!(state.selection(), None);
         assert_eq!(state.pending_start(), None);
+    }
+
+    #[test]
+    fn selection_state_has_any_tracks_pending_and_completed_ranges() {
+        let mut state = WaveformSelectionState::default();
+        assert!(!state.has_any());
+
+        state.handle_left_click(5.0, (0.0, 30.0));
+        assert!(state.has_any());
+
+        state.handle_left_click(10.0, (0.0, 30.0));
+        assert!(state.has_any());
+
+        state.clear();
+        assert!(!state.has_any());
     }
 }

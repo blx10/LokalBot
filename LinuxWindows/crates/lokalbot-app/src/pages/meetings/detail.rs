@@ -1,5 +1,6 @@
 use crate::i18n::h_flex;
 use crate::windows::screen_image::{self, ScreenImage};
+use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Textarea;
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
@@ -9,7 +10,7 @@ use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Disableable as _, Sizable as _, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, Context, Div, FontWeight, Hsla, InteractiveElement as _, IntoElement,
+    AnyElement, Context, Div, FontWeight, Hsla, InteractiveElement as _, IntoElement, KeyDownEvent,
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
     px, white,
 };
@@ -131,6 +132,9 @@ impl MeetingsPage {
         v_flex()
             .size_full()
             .bg(lb.page)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                this.handle_escape_selection(event, window, cx);
+            }))
             .child(
                 div().w_full().flex().justify_center().flex_none().child(
                     self.page_column(cx)
@@ -138,7 +142,7 @@ impl MeetingsPage {
                         .pb(px(12.))
                         .gap(px(14.))
                         .child(self.render_title_block(&doc, cx))
-                        .child(self.render_player(&doc, cx))
+                        .child(self.render_player(&doc, window, cx))
                         .when(placement == FindPlacement::PinnedBar, |this| {
                             this.child(self.render_find_bar(cx))
                         }),
@@ -323,7 +327,12 @@ impl MeetingsPage {
         Some(row.into_any_element())
     }
 
-    fn render_player(&self, doc: &MeetingDoc, cx: &mut Context<Self>) -> AnyElement {
+    fn render_player(
+        &self,
+        doc: &MeetingDoc,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let lb = cx.lb().clone();
         if !doc.has_audio || self.player.is_none() {
             let label = if doc.has_audio && self.player_loading {
@@ -397,6 +406,8 @@ impl MeetingsPage {
                     crate::ui::waveform::HEIGHT
                 },
                 is_busy,
+                is_dragging: self.waveform_drag.is_some(),
+                allow_escape_clear: !window.has_active_dialog(cx) && !self.find.open,
                 has_trimmed_boundaries,
                 focus_handle: self.waveform_focus.clone(),
             },

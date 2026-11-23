@@ -1,4 +1,5 @@
 use crate::i18n::h_flex;
+use gpui_kit::component::WindowExt as _;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::Input;
 use gpui_kit::component::menu::{ContextMenuExt as _, PopupMenuItem};
@@ -119,6 +120,14 @@ impl MeetingsPage {
                 } else if let Some(id) = self.selected {
                     dialogs::confirm_delete(self.data.clone(), vec![id], window, cx);
                 }
+            }
+            "escape"
+                if !window.has_active_dialog(cx)
+                    && !self.find.open
+                    && self.waveform_selection.has_any() =>
+            {
+                self.waveform_selection.clear();
+                cx.notify();
             }
             _ => return,
         }
