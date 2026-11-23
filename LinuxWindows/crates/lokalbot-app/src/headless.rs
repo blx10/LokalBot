@@ -58,9 +58,20 @@ fn health(
     Ok(())
 }
 
+#[cfg(test)]
 pub fn run(command: &Command, paths: &LibraryPaths) -> i32 {
+    run_with_config(command, paths, None)
+}
+
+pub fn run_with_config(
+    command: &Command,
+    paths: &LibraryPaths,
+    explicit_config: Option<&std::path::Path>,
+) -> i32 {
     let result = (|| -> Result<(), String> {
-        let settings = Settings::load(&paths.settings_file());
+        let (settings, _) =
+            lokalbot_core::config_profile::load_effective_settings(explicit_config, paths)
+                .map_err(|err| lokalbot_core::text::redact(&format!("{err:#}")))?;
         let library = Library::open(paths.clone()).map_err(|err| format!("{err:#}"))?;
         match command {
             Command::Health { day, json } => health(&library, &settings, day.as_deref(), *json),

@@ -7,11 +7,12 @@ use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Disableable as _, Sizable as _, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, Context, FontWeight, Hsla, InteractiveElement as _, IntoElement as _,
-    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
-    px,
+    AnyElement, App, AppContext as _, Context, FontWeight, Hsla, InteractiveElement as _,
+    IntoElement as _, ParentElement as _, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Window, div, px,
 };
 use lokalbot_core::Settings;
+use lokalbot_core::config_profile::TranscriptionMode;
 use lokalbot_core::settings::{GenerationBudget, SummarizerBackend};
 use lokalbot_engine::{ModelCheckStatus, ModelRole};
 
@@ -397,6 +398,8 @@ impl SettingsPage {
             roles = roles.row(models::role_setting(row.role), element);
         }
         sections.push(roles);
+        sections.push(self.multi_stt_section(&settings, cx));
+        sections.push(self.config_profile_section(cx));
 
         let page = cx.entity();
         let open = move |target: ModelsPage| {
@@ -583,6 +586,477 @@ impl SettingsPage {
             );
         settings_row::content_row("settings-default-model-upgrade", row, false, cx)
             .into_any_element()
+    }
+
+    fn multi_stt_section(&self, settings: &Settings, cx: &mut Context<Self>) -> Section {
+        let lb = cx.lb().clone();
+        let mode_data = self.data.clone();
+        let fallback_data = self.data.clone();
+        let audit_data = self.data.clone();
+        let preview_data = self.data.clone();
+        let threads_dec = self.data.clone();
+        let threads_inc = self.data.clone();
+        let page = cx.entity();
+        let multi_on = settings.transcription_mode == TranscriptionMode::AsymmetricMultiStt;
+
+        let slot_row = |id: &'static str,
+                        role_label: &'static str,
+                        slot: &lokalbot_core::config_profile::SttModelSlot,
+                        setter: fn(&mut Settings, String),
+                        cx: &App| {
+            let slot_data = self.data.clone();
+            let selected = if slot.device.eq_ignore_ascii_case("igpu") {
+                0
+            } else {
+                1
+            };
+            h_flex()
+                .w_full()
+                .gap(px(10.))
+                .items_center()
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap(px(2.))
+                        .child(
+                            div()
+                                .text_size(ty::BODY)
+                                .text_color(lb.text)
+                                .child(role_label),
+                        )
+                        .child(
+                            div()
+                                .text_size(ty::SECONDARY)
+                                .text_color(lb.text_secondary)
+                                .child(slot.id.clone()),
+                        ),
+                )
+                .child(settings_row::segmented(
+                    id,
+                    &[lokalbot_i18n::tr("iGPU"), lokalbot_i18n::tr("CPU")],
+                    selected,
+                    move |index, _, cx| {
+                        let device = if index == 0 { "igpu" } else { "cpu" };
+                        slot_data.update(cx, |data, cx| {
+                            data.update_settings(|s| setter(s, device.into()), cx)
+                        });
+                    },
+                    cx,
+                ))
+        };
+
+        let pc_value = if settings.post_correction_enabled {
+            if settings.post_correction_base_url.trim().is_empty() {
+                lokalbot_i18n::tr("Not configured").to_string()
+            } else {
+                lokalbot_i18n::tr("Enabled").to_string()
+            }
+        } else {
+            lokalbot_i18n::tr("Off").to_string()
+        };
+
+        Section::new(lokalbot_i18n::tr("Asymmetric Multi-STT"))
+            .row(
+                "settings.transcriptionMode",
+                settings_row::content_row(
+                    "settings.transcriptionMode",
+                    h_flex()
+                        .w_full()
+                        .gap(px(12.))
+                        .items_center()
+                        .child(
+                            settings_row::label(
+                                lokalbot_i18n::tr("Asymmetric Multi-STT"),
+                                Some(lokalbot_i18n::tr("Runs 3 speech models sequentially and optionally repairs transcripts with remote LLMs.").into()),
+                                cx,
+                            )
+                            .flex_1(),
+                        )
+                        .child(settings_row::switch(
+                            "settings.transcriptionMode",
+                            multi_on,
+                            move |on, _, cx| {
+                                mode_data.update(cx, |data, cx| {
+                                    data.update_settings(
+                                        |s| {
+                                            s.transcription_mode = if on {
+                                                TranscriptionMode::AsymmetricMultiStt
+                                            } else {
+                                                TranscriptionMode::Single
+                                            };
+                                        },
+                                        cx,
+                                    )
+                                });
+                            },
+                        )),
+                    self.is_focused("settings.transcriptionMode"),
+                    cx,
+                ),
+            )
+            .row(
+                "settings.transcriptionModels",
+                settings_row::content_row(
+                    "settings.transcriptionModels",
+                    v_flex()
+                        .w_full()
+                        .gap(px(10.))
+                        .child(slot_row(
+                            "settings-stt-primary-device",
+                            lokalbot_i18n::tr("Primary model"),
+                            &settings.transcription_models.primary,
+                            |s, d| s.transcription_models.primary.device = d,
+                            cx,
+                        ))
+                        .child(slot_row(
+                            "settings-stt-backup-device",
+                            lokalbot_i18n::tr("TR backup model"),
+                            &settings.transcription_models.tr_backup,
+                            |s, d| s.transcription_models.tr_backup.device = d,
+                            cx,
+                        ))
+                        .child(slot_row(
+                            "settings-stt-helper-device",
+                            lokalbot_i18n::tr("Fast helper model"),
+                            &settings.transcription_models.fast_helper,
+                            |s, d| s.transcription_models.fast_helper.device = d,
+                            cx,
+                        )),
+                    false,
+                    cx,
+                ),
+            )
+            .row(
+                "settings.transcriptionAutoFallbackToCpu",
+                settings_row::row(
+                    "settings.transcriptionAutoFallbackToCpu",
+                    lokalbot_i18n::tr("Fall back to CPU automatically"),
+                    Some(lokalbot_i18n::tr("Use CPU automatically if no compatible iGPU is found.").into()),
+                    settings_row::switch(
+                        "settings.transcriptionAutoFallbackToCpu",
+                        settings.transcription_auto_fallback_to_cpu,
+                        move |on, _, cx| {
+                            fallback_data.update(cx, |data, cx| {
+                                data.update_settings(
+                                    |s| s.transcription_auto_fallback_to_cpu = on,
+                                    cx,
+                                )
+                            });
+                        },
+                    ),
+                    false,
+                    cx,
+                ),
+            )
+            .row(
+                "settings.transcriptionSaveAuditLog",
+                settings_row::row(
+                    "settings.transcriptionSaveAuditLog",
+                    lokalbot_i18n::tr("Save post-correction audit log"),
+                    Some(lokalbot_i18n::tr("Write asr-post-correction-audit.json in each meeting folder.").into()),
+                    settings_row::switch(
+                        "settings.transcriptionSaveAuditLog",
+                        settings.transcription_save_audit_log,
+                        move |on, _, cx| {
+                            audit_data.update(cx, |data, cx| {
+                                data.update_settings(|s| s.transcription_save_audit_log = on, cx)
+                            });
+                        },
+                    ),
+                    false,
+                    cx,
+                ),
+            )
+            .row(
+                "settings.livePreviewDuringMeeting",
+                settings_row::row(
+                    "settings.livePreviewDuringMeeting",
+                    lokalbot_i18n::tr("Live preview during meeting"),
+                    Some(lokalbot_i18n::tr("Show live transcript text while recording.").into()),
+                    settings_row::switch(
+                        "settings.livePreviewDuringMeeting",
+                        settings.live_preview_during_meeting,
+                        move |on, _, cx| {
+                            preview_data.update(cx, |data, cx| {
+                                data.update_settings(|s| s.live_preview_during_meeting = on, cx)
+                            });
+                        },
+                    ),
+                    false,
+                    cx,
+                ),
+            )
+            .row(
+                "settings.transcriptionCpuThreads",
+                settings_row::content_row(
+                    "settings.transcriptionCpuThreads",
+                    h_flex()
+                        .w_full()
+                        .gap(px(10.))
+                        .items_center()
+                        .child(
+                            settings_row::label(
+                                lokalbot_i18n::tr("CPU threads"),
+                                Some(lokalbot_i18n::tr("Threads used for CPU speech recognition.").into()),
+                                cx,
+                            )
+                            .flex_1(),
+                        )
+                        .child(
+                            Button::new("settings-cpu-threads-dec")
+                                .outline()
+                                .xsmall()
+                                .label("-")
+                                .disabled(settings.transcription_cpu_threads <= 1)
+                                .on_click(move |_, _, cx| {
+                                    threads_dec.update(cx, |data, cx| {
+                                        data.update_settings(
+                                            |s| {
+                                                s.transcription_cpu_threads =
+                                                    s.transcription_cpu_threads.saturating_sub(1).max(1)
+                                            },
+                                            cx,
+                                        )
+                                    });
+                                }),
+                        )
+                        .child(
+                            div()
+                                .min_w(px(28.))
+                                .text_size(ty::BODY)
+                                .text_color(lb.text)
+                                .child(settings.transcription_cpu_threads.to_string()),
+                        )
+                        .child(
+                            Button::new("settings-cpu-threads-inc")
+                                .outline()
+                                .xsmall()
+                                .label("+")
+                                .disabled(settings.transcription_cpu_threads >= 64)
+                                .on_click(move |_, _, cx| {
+                                    threads_inc.update(cx, |data, cx| {
+                                        data.update_settings(
+                                            |s| {
+                                                s.transcription_cpu_threads =
+                                                    (s.transcription_cpu_threads + 1).min(64)
+                                            },
+                                            cx,
+                                        )
+                                    });
+                                }),
+                        ),
+                    false,
+                    cx,
+                ),
+            )
+            .row(
+                "settings.postCorrection",
+                drill_row(
+                    "settings-models-post-correction",
+                    lokalbot_i18n::tr("Post-correction"),
+                    Some(lokalbot_i18n::tr("Two-stage remote LLM repair after Multi-STT transcription")),
+                    Some(pc_value),
+                    move |_, cx| {
+                        page.update(cx, |page, cx| {
+                            page.models.page = ModelsPage::PostCorrection;
+                            cx.notify();
+                        })
+                    },
+                    cx,
+                ),
+            )
+    }
+
+    fn config_profile_section(&self, cx: &mut Context<Self>) -> Section {
+        let lb = cx.lb().clone();
+        let data = self.data.read(cx);
+        let active_path = data
+            .config_path
+            .clone()
+            .unwrap_or_else(|| data.library.paths().config_file());
+        let path_display = active_path.display().to_string();
+        let import_data = self.data.clone();
+        let export_data = self.data.clone();
+        let export_dir = active_path
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| data.library.paths().root().to_path_buf());
+
+        Section::new(lokalbot_i18n::tr("Configuration file")).row(
+            "settings.configProfile",
+            settings_row::content_row(
+                "settings.configProfile",
+                h_flex()
+                    .w_full()
+                    .gap(px(12.))
+                    .items_center()
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap(px(3.))
+                            .child(
+                                div()
+                                    .text_size(ty::BODY)
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(lb.text)
+                                    .child("lokalbot-config.toml"),
+                            )
+                            .child(settings_row::help(path_display, cx)),
+                    )
+                    .child(
+                        h_flex()
+                            .gap(px(8.))
+                            .child(
+                                Button::new("settings-config-import")
+                                    .outline()
+                                    .small()
+                                    .label(lokalbot_i18n::tr("Import…"))
+                                    .on_click(move |_, _, cx| {
+                                        let receiver = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
+                                            files: true,
+                                            directories: false,
+                                            multiple: false,
+                                            prompt: Some(
+                                                lokalbot_i18n::tr(
+                                                    "Choose a lokalbot-config.toml file to import",
+                                                )
+                                                .into(),
+                                            ),
+                                        });
+                                        let existing = import_data.read(cx).config_profile.clone();
+                                        let data = import_data.clone();
+                                        cx.spawn(async move |cx| {
+                                            let picked = receiver.await;
+                                            let path = match picked {
+                                                Ok(Ok(Some(paths))) => paths.into_iter().next(),
+                                                Ok(Ok(None)) | Err(_) => None,
+                                                Ok(Err(err)) => {
+                                                    data.update(cx, |data, cx| {
+                                                        data.show_error(
+                                                            lokalbot_i18n::format(
+                                                                "No file chooser is available: {err}",
+                                                                &[("err", format!("{err:#}"))],
+                                                            ),
+                                                            cx,
+                                                        )
+                                                    });
+                                                    return;
+                                                }
+                                            };
+                                            let Some(path) = path else {
+                                                return;
+                                            };
+                                            let parsed = cx
+                                                .background_spawn(async move {
+                                                    let raw = std::fs::read_to_string(&path)?;
+                                                    lokalbot_core::ConfigProfile::import_toml(
+                                                        &raw,
+                                                        existing.as_ref(),
+                                                    )
+                                                })
+                                                .await;
+                                            data.update(cx, |data, cx| match parsed {
+                                                Ok(imported) => {
+                                                    data.update_config_and_settings(
+                                                        move |profile, _| *profile = imported,
+                                                        cx,
+                                                    );
+                                                    data.show_message(
+                                                        lokalbot_i18n::tr("Config imported."),
+                                                        cx,
+                                                    );
+                                                }
+                                                Err(err) => {
+                                                    let msg = lokalbot_core::text::redact(
+                                                        &format!("{err:#}"),
+                                                    );
+                                                    data.show_error(
+                                                        lokalbot_i18n::format(
+                                                            "Could not import config: {err}",
+                                                            &[("err", msg)],
+                                                        ),
+                                                        cx,
+                                                    );
+                                                }
+                                            });
+                                        })
+                                        .detach();
+                                    }),
+                            )
+                            .child(
+                                Button::new("settings-config-export")
+                                    .outline()
+                                    .small()
+                                    .label(lokalbot_i18n::tr("Export…"))
+                                    .on_click(move |_, _, cx| {
+                                        let receiver = cx.prompt_for_new_path(
+                                            &export_dir,
+                                            Some("lokalbot-config.toml"),
+                                        );
+                                        let profile = export_data
+                                            .read(cx)
+                                            .config_profile
+                                            .clone()
+                                            .unwrap_or_else(|| {
+                                                lokalbot_core::ConfigProfile::from_settings(
+                                                    &export_data.read(cx).settings,
+                                                    None,
+                                                )
+                                            });
+                                        let data = export_data.clone();
+                                        cx.spawn(async move |cx| {
+                                            let path = match receiver.await {
+                                                Ok(Ok(Some(path))) => path,
+                                                Ok(Ok(None)) | Err(_) => return,
+                                                Ok(Err(err)) => {
+                                                    data.update(cx, |data, cx| {
+                                                        data.show_error(
+                                                            lokalbot_i18n::format(
+                                                                "No file chooser is available: {err}",
+                                                                &[("err", format!("{err:#}"))],
+                                                            ),
+                                                            cx,
+                                                        )
+                                                    });
+                                                    return;
+                                                }
+                                            };
+                                            let result = cx
+                                                .background_spawn(async move {
+                                                    let exported = profile.export_toml(true)?;
+                                                    std::fs::write(&path, exported.as_bytes())?;
+                                                    Ok::<(), anyhow::Error>(())
+                                                })
+                                                .await;
+                                            data.update(cx, |data, cx| match result {
+                                                Ok(()) => data.show_message(
+                                                    lokalbot_i18n::tr("Config exported."),
+                                                    cx,
+                                                ),
+                                                Err(err) => {
+                                                    let msg = lokalbot_core::text::redact(
+                                                        &format!("{err:#}"),
+                                                    );
+                                                    data.show_error(
+                                                        lokalbot_i18n::format(
+                                                            "Could not export config: {err}",
+                                                            &[("err", msg)],
+                                                        ),
+                                                        cx,
+                                                    );
+                                                }
+                                            });
+                                        })
+                                        .detach();
+                                    }),
+                            ),
+                    ),
+                self.is_focused("settings.configProfile"),
+                cx,
+            ),
+        )
     }
 
     fn model_set_row(&self, settings: &Settings, cx: &mut Context<Self>) -> AnyElement {

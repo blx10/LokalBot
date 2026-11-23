@@ -96,6 +96,9 @@ impl Models {
 
     pub fn think_requirements(&self) -> Vec<String> {
         let settings = self.shared.settings();
+        if settings.disable_local_llama_server {
+            return Vec::new();
+        }
         match settings.summarizer_backend {
             SummarizerBackend::BuiltIn => {
                 vec![settings.built_in_model_id.clone(), RUNTIME_ID.to_string()]

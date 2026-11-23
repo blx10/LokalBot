@@ -5,8 +5,8 @@ use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::{Disableable as _, Icon, Sizable as _, WindowExt as _, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, Div, Entity, FontWeight, IntoElement as _,
-    ParentElement as _, SharedString, Styled as _, Subscription, Window, div, px,
+    AnyElement, App, AppContext as _, Context, Div, Entity, Focusable as _, FontWeight,
+    IntoElement as _, ParentElement as _, SharedString, Styled as _, Subscription, Window, div, px,
 };
 use lokalbot_agent::session::reasoning_name;
 use lokalbot_core::Settings;
@@ -79,7 +79,8 @@ pub fn model_bytes(id: &str, settings: &Settings) -> u64 {
 
 pub fn models_in_use(settings: &Settings) -> Vec<String> {
     let mut ids = speech_needs(settings);
-    let built_in = settings.summarizer_backend == SummarizerBackend::BuiltIn;
+    let built_in = settings.summarizer_backend == SummarizerBackend::BuiltIn
+        && !settings.disable_local_llama_server;
     if built_in {
         ids.push(settings.built_in_model_id.clone());
     }
@@ -281,6 +282,7 @@ pub(super) const BUDGETS: [GenerationBudget; 4] = [
 pub enum ModelsPage {
     Active,
     Connections,
+    PostCorrection,
     Downloaded,
     Other,
     ReadAloud,
@@ -297,6 +299,7 @@ impl ModelsPage {
             | "settings.openAIBaseURL"
             | "settings.openAIModel"
             | "settings.ollamaBaseURL" => ModelsPage::Connections,
+            "settings.postCorrection" => ModelsPage::PostCorrection,
             "settings.unusedModels" => ModelsPage::Downloaded,
             "settings.semanticSearchEnabled" => ModelsPage::Other,
             "settings.speechVoice" | "settings.speechSpeed" => ModelsPage::ReadAloud,
@@ -319,6 +322,14 @@ pub struct ModelsState {
     openai_url: Entity<InputState>,
     openai_model: Entity<InputState>,
     api_key: Entity<InputState>,
+    think_config_key: Entity<InputState>,
+    think_config_key_dirty: bool,
+    post_correction_url: Entity<InputState>,
+    post_correction_key: Entity<InputState>,
+    post_correction_key_dirty: bool,
+    post_correction_judge: Entity<InputState>,
+    post_correction_critics: Entity<InputState>,
+    post_correction_saved: Option<SharedString>,
     ollama_url: Entity<InputState>,
     ollama_model: Entity<InputState>,
     saved: Option<SharedString>,
@@ -369,6 +380,41 @@ impl ModelsState {
                     .placeholder(crate::i18n::placeholder("API key (optional)", window, cx))
                     .masked(true)
             }),
+            think_config_key: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(crate::i18n::placeholder("API key (optional)", window, cx))
+                    .masked(true)
+                    .default_value(lokalbot_core::text::mask_api_key(&settings.think_api_key))
+            }),
+            think_config_key_dirty: false,
+            post_correction_url: field(
+                "https://example.com/v1",
+                &settings.post_correction_base_url,
+                window,
+                cx,
+            ),
+            post_correction_key: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(crate::i18n::placeholder("API key (optional)", window, cx))
+                    .masked(true)
+                    .default_value(lokalbot_core::text::mask_api_key(
+                        &settings.post_correction_api_key,
+                    ))
+            }),
+            post_correction_key_dirty: false,
+            post_correction_judge: field(
+                "Qwen3.8-27B",
+                &settings.post_correction_primary_judge_model,
+                window,
+                cx,
+            ),
+            post_correction_critics: field(
+                "gemma-4-31B-it, gpt-oss-120b",
+                &settings.post_correction_support_critic_models.join(", "),
+                window,
+                cx,
+            ),
+            post_correction_saved: None,
             ollama_url: field(
                 "http://localhost:11434",
                 &settings.ollama_base_url,
@@ -408,6 +454,92 @@ impl ModelsState {
             })
         })
         .collect();
+        for input in [
+            &state.post_correction_url,
+            &state.post_correction_judge,
+            &state.post_correction_critics,
+        ] {
+            subscriptions.push(cx.subscribe_in(
+                input,
+                window,
+                |page, _, event: &InputEvent, _, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        page.models.post_correction_saved = None;
+                        cx.notify();
+                    }
+                },
+            ));
+        }
+        subscriptions.push(cx.subscribe_in(
+            &state.think_config_key,
+            window,
+            |page, input, event: &InputEvent, window, cx| match event {
+                InputEvent::Focus => {
+                    if !page.models.think_config_key_dirty
+                        && lokalbot_core::text::is_masked_api_key(&input.read(cx).value())
+                    {
+                        input.update(cx, |field, cx| field.set_value("", window, cx));
+                    }
+                }
+                InputEvent::Change => {
+                    if input.read(cx).focus_handle(cx).is_focused(window) {
+                        page.models.think_config_key_dirty = true;
+                        page.models.saved = None;
+                        cx.notify();
+                    }
+                }
+                InputEvent::Blur => {
+                    let stored = !page.data.read(cx).settings.think_api_key.trim().is_empty();
+                    if !page.models.think_config_key_dirty
+                        && stored
+                        && input.read(cx).value().trim().is_empty()
+                    {
+                        input.update(cx, |field, cx| {
+                            field.set_value(lokalbot_core::text::API_KEY_MASK, window, cx)
+                        });
+                    }
+                }
+                _ => {}
+            },
+        ));
+        subscriptions.push(cx.subscribe_in(
+            &state.post_correction_key,
+            window,
+            |page, input, event: &InputEvent, window, cx| match event {
+                InputEvent::Focus => {
+                    if !page.models.post_correction_key_dirty
+                        && lokalbot_core::text::is_masked_api_key(&input.read(cx).value())
+                    {
+                        input.update(cx, |field, cx| field.set_value("", window, cx));
+                    }
+                }
+                InputEvent::Change => {
+                    if input.read(cx).focus_handle(cx).is_focused(window) {
+                        page.models.post_correction_key_dirty = true;
+                        page.models.post_correction_saved = None;
+                        cx.notify();
+                    }
+                }
+                InputEvent::Blur => {
+                    let stored = !page
+                        .data
+                        .read(cx)
+                        .settings
+                        .post_correction_api_key
+                        .trim()
+                        .is_empty();
+                    if !page.models.post_correction_key_dirty
+                        && stored
+                        && input.read(cx).value().trim().is_empty()
+                    {
+                        input.update(cx, |field, cx| {
+                            field.set_value(lokalbot_core::text::API_KEY_MASK, window, cx)
+                        });
+                    }
+                }
+                _ => {}
+            },
+        ));
         subscriptions.extend(state.options.subscribe(window, cx));
         subscriptions.extend(state.browse.subscribe(window, cx));
         subscriptions
@@ -425,10 +557,43 @@ impl ModelsState {
             (&self.openai_model, &old.openai_model, &new.openai_model),
             (&self.ollama_url, &old.ollama_base_url, &new.ollama_base_url),
             (&self.ollama_model, &old.ollama_model, &new.ollama_model),
+            (
+                &self.post_correction_url,
+                &old.post_correction_base_url,
+                &new.post_correction_base_url,
+            ),
+            (
+                &self.post_correction_judge,
+                &old.post_correction_primary_judge_model,
+                &new.post_correction_primary_judge_model,
+            ),
         ] {
             if before != after {
                 super::sync_input(input, after, window, cx);
             }
+        }
+        let old_critics = old.post_correction_support_critic_models.join(", ");
+        let new_critics = new.post_correction_support_critic_models.join(", ");
+        if old_critics != new_critics {
+            super::sync_input(&self.post_correction_critics, &new_critics, window, cx);
+        }
+        if old.think_api_key != new.think_api_key {
+            self.think_config_key_dirty = false;
+            super::sync_input(
+                &self.think_config_key,
+                lokalbot_core::text::mask_api_key(&new.think_api_key),
+                window,
+                cx,
+            );
+        }
+        if old.post_correction_api_key != new.post_correction_api_key {
+            self.post_correction_key_dirty = false;
+            super::sync_input(
+                &self.post_correction_key,
+                lokalbot_core::text::mask_api_key(&new.post_correction_api_key),
+                window,
+                cx,
+            );
         }
         self.options.sync(new, window, cx);
     }
@@ -451,7 +616,9 @@ impl ModelsState {
                 url != settings.ollama_base_url || model != settings.ollama_model
             }
             SummarizerBackend::OpenAICompatible => {
-                url != settings.openai_base_url || model != settings.openai_model
+                url != settings.openai_base_url
+                    || model != settings.openai_model
+                    || self.think_config_key_dirty
             }
             SummarizerBackend::BuiltIn
             | SummarizerBackend::ChatGptPlan
@@ -459,6 +626,15 @@ impl ModelsState {
             | SummarizerBackend::AntigravityPlan
             | SummarizerBackend::GeminiPlan => false,
         }
+    }
+}
+
+pub(crate) fn resolve_masked_api_key_edit(stored: &str, input_value: &str) -> String {
+    let trimmed = input_value.trim();
+    if lokalbot_core::text::is_masked_api_key(trimmed) {
+        stored.to_string()
+    } else {
+        trimmed.to_string()
     }
 }
 
@@ -471,6 +647,7 @@ impl SettingsPage {
         match self.models.page {
             ModelsPage::Active => self.models_overview(window, cx),
             ModelsPage::Connections => self.connections(window, cx),
+            ModelsPage::PostCorrection => self.post_correction_page(cx),
             ModelsPage::Downloaded => self.downloaded_models_page(cx),
             ModelsPage::Other => self.other_models_page(cx),
             ModelsPage::ReadAloud => self.read_aloud_page(cx),
@@ -908,9 +1085,65 @@ impl SettingsPage {
         } else {
             let key_data = self.data.clone();
             let key_input = self.models.api_key.clone();
+            let cfg_key_input = self.models.think_config_key.clone();
+            let cfg_key_field = if self.models.think_config_key_dirty {
+                Input::new(&self.models.think_config_key).mask_toggle()
+            } else {
+                Input::new(&self.models.think_config_key)
+            };
+            let cfg_page = page.clone();
+            let disable_data = self.data.clone();
             form = form
                 .child(field(lokalbot_i18n::tr("Server URL"), &self.models.openai_url, cx))
                 .child(field(lokalbot_i18n::tr("Model ID"), &self.models.openai_model, cx))
+                .child(
+                    v_flex()
+                        .gap(px(5.))
+                        .child(div().text_size(ty::BODY).text_color(lb.text).child(crate::ui::text::paragraph(lokalbot_i18n::tr("Config API key"))))
+                        .child(
+                            h_flex()
+                                .gap(px(8.))
+                                .child(div().flex_1().min_w_0().child(cfg_key_field))
+                                .child(Button::new("settings-save-config-key").outline().small().label(lokalbot_i18n::tr("Save to config")).on_click(move |_, _, cx| {
+                                    let raw = cfg_key_input.read(cx).value().to_string();
+                                    cfg_page.update(cx, |page, cx| {
+                                        page.models.think_config_key_dirty = false;
+                                        page.data.update(cx, |data, cx| {
+                                            data.update_config_and_settings(|profile, settings| {
+                                                let resolved = resolve_masked_api_key_edit(&profile.think.api_key, &raw);
+                                                profile.think.api_key = resolved.clone();
+                                                settings.think_api_key = resolved;
+                                            }, cx);
+                                            data.show_message(lokalbot_i18n::tr("Saved to lokalbot-config.toml."), cx);
+                                        });
+                                        cx.notify();
+                                    });
+                                })),
+                        )
+                        .child(settings_row::help(lokalbot_i18n::tr("Stored in lokalbot-config.toml and masked in the UI."), cx)),
+                )
+                .child(
+                    h_flex()
+                        .gap(px(12.))
+                        .items_center()
+                        .child(
+                            settings_row::label(
+                                lokalbot_i18n::tr("Disable local llama-server"),
+                                Some(lokalbot_i18n::tr("Skip launching local llama-server when using a remote Think server.").into()),
+                                cx,
+                            )
+                            .flex_1(),
+                        )
+                        .child(settings_row::switch(
+                            "settings.disableLocalLlamaServer",
+                            settings.disable_local_llama_server,
+                            move |on, _, cx| {
+                                disable_data.update(cx, |data, cx| {
+                                    data.update_settings(|s| s.disable_local_llama_server = on, cx)
+                                })
+                            },
+                        )),
+                )
                 .child(
                     v_flex()
                         .gap(px(5.))
@@ -1301,19 +1534,317 @@ impl SettingsPage {
     fn save_connection(&mut self, cx: &mut Context<Self>) {
         let (url, model) = self.models.draft(cx);
         let ollama = self.models.connection == SummarizerBackend::Ollama;
-        self.update_settings(
-            move |s| {
-                if ollama {
-                    s.ollama_base_url = url;
-                    s.ollama_model = model;
-                } else {
-                    s.openai_base_url = url;
-                    s.openai_model = model;
-                }
+        let raw_cfg_key = self.models.think_config_key.read(cx).value().to_string();
+        self.models.think_config_key_dirty = false;
+        self.data.update(cx, |data, cx| {
+            data.update_config_and_settings(
+                move |profile, s| {
+                    if ollama {
+                        s.ollama_base_url = url;
+                        s.ollama_model = model;
+                    } else {
+                        s.openai_base_url = url;
+                        s.openai_model = model;
+                        let resolved =
+                            resolve_masked_api_key_edit(&profile.think.api_key, &raw_cfg_key);
+                        profile.think.api_key = resolved.clone();
+                        s.think_api_key = resolved;
+                    }
+                    profile.sync_from_settings(s);
+                },
+                cx,
+            );
+        });
+        self.models.saved = Some(lokalbot_i18n::tr("Saved").into());
+        cx.notify();
+    }
+
+    pub(super) fn post_correction_page(&self, cx: &mut Context<Self>) -> Vec<Section> {
+        let lb = cx.lb().clone();
+        let settings = self.data.read(cx).settings.clone();
+        let page = cx.entity();
+        let bar = Section::bare(super::subpage::bar(
+            "settings-post-correction-back",
+            lokalbot_i18n::tr("Models"),
+            lokalbot_i18n::tr("Post-correction"),
+            move |_, cx| {
+                page.update(cx, |page, cx| {
+                    page.models.page = ModelsPage::Active;
+                    cx.notify();
+                })
             },
             cx,
-        );
-        self.models.saved = Some(lokalbot_i18n::tr("Saved").into());
+        ));
+        let data = self.data.clone();
+        let draft_url = self
+            .models
+            .post_correction_url
+            .read(cx)
+            .value()
+            .trim()
+            .to_string();
+        let pc_key_field = if self.models.post_correction_key_dirty {
+            Input::new(&self.models.post_correction_key).mask_toggle()
+        } else {
+            Input::new(&self.models.post_correction_key)
+        };
+        let field = |label: &'static str, input: &Entity<InputState>, _cx: &App| {
+            v_flex()
+                .gap(px(5.))
+                .child(div().text_size(ty::BODY).text_color(lb.text).child(label))
+                .child(Input::new(input))
+        };
+        let stepper = |id_prefix: &'static str,
+                       label: &'static str,
+                       value: usize,
+                       step: usize,
+                       min: usize,
+                       max: usize,
+                       on_set: fn(&mut Settings, usize),
+                       cx: &App| {
+            let dec_data = data.clone();
+            let inc_data = data.clone();
+            h_flex()
+                .gap(px(10.))
+                .items_center()
+                .child(
+                    div()
+                        .flex_1()
+                        .text_size(ty::BODY)
+                        .text_color(cx.lb().text)
+                        .child(label),
+                )
+                .child(
+                    Button::new(SharedString::from(format!("{id_prefix}-dec")))
+                        .outline()
+                        .xsmall()
+                        .label("-")
+                        .disabled(value <= min)
+                        .on_click(move |_, _, cx| {
+                            let next = value.saturating_sub(step).max(min);
+                            dec_data.update(cx, |d, cx| d.update_settings(|s| on_set(s, next), cx));
+                        }),
+                )
+                .child(
+                    div()
+                        .min_w(px(36.))
+                        .text_size(ty::BODY)
+                        .text_color(cx.lb().text)
+                        .child(value.to_string()),
+                )
+                .child(
+                    Button::new(SharedString::from(format!("{id_prefix}-inc")))
+                        .outline()
+                        .xsmall()
+                        .label("+")
+                        .disabled(value >= max)
+                        .on_click(move |_, _, cx| {
+                            let next = value.saturating_add(step).min(max);
+                            inc_data.update(cx, |d, cx| d.update_settings(|s| on_set(s, next), cx));
+                        }),
+                )
+        };
+        let enabled_data = self.data.clone();
+        let critic_fail_data = self.data.clone();
+        let save_page = cx.entity();
+        let form = v_flex()
+            .w_full()
+            .gap(px(14.))
+            .child(
+                h_flex()
+                    .gap(px(12.))
+                    .items_center()
+                    .child(
+                        settings_row::label(
+                            lokalbot_i18n::tr("Enable LLM post-correction"),
+                            Some(
+                                lokalbot_i18n::tr(
+                                    "Two-stage remote LLM repair after Multi-STT transcription",
+                                )
+                                .into(),
+                            ),
+                            cx,
+                        )
+                        .flex_1(),
+                    )
+                    .child(settings_row::switch(
+                        "settings.postCorrectionEnabled",
+                        settings.post_correction_enabled,
+                        move |on, _, cx| {
+                            enabled_data.update(cx, |d, cx| {
+                                d.update_settings(|s| s.post_correction_enabled = on, cx)
+                            });
+                        },
+                    )),
+            )
+            .child(field(
+                lokalbot_i18n::tr("Server URL"),
+                &self.models.post_correction_url,
+                cx,
+            ))
+            .child(
+                v_flex()
+                    .gap(px(5.))
+                    .child(
+                        div()
+                            .text_size(ty::BODY)
+                            .text_color(lb.text)
+                            .child(lokalbot_i18n::tr("Config API key")),
+                    )
+                    .child(pc_key_field),
+            )
+            .child(field(
+                lokalbot_i18n::tr("Judge model"),
+                &self.models.post_correction_judge,
+                cx,
+            ))
+            .child(field(
+                lokalbot_i18n::tr("Critic models (comma-separated)"),
+                &self.models.post_correction_critics,
+                cx,
+            ))
+            .child(stepper(
+                "pc-segments",
+                lokalbot_i18n::tr("Segments per batch"),
+                settings.post_correction_segments_per_batch,
+                1,
+                1,
+                100,
+                |s, v| s.post_correction_segments_per_batch = v,
+                cx,
+            ))
+            .child(stepper(
+                "pc-timeout",
+                lokalbot_i18n::tr("Request timeout (seconds)"),
+                settings.post_correction_request_timeout_sec as usize,
+                15,
+                15,
+                3600,
+                |s, v| s.post_correction_request_timeout_sec = v as u64,
+                cx,
+            ))
+            .child(stepper(
+                "pc-concurrency",
+                lokalbot_i18n::tr("Max concurrent batches"),
+                settings.post_correction_max_concurrent_batches,
+                1,
+                1,
+                32,
+                |s, v| s.post_correction_max_concurrent_batches = v,
+                cx,
+            ))
+            .child(
+                h_flex()
+                    .gap(px(12.))
+                    .items_center()
+                    .child(
+                        settings_row::label(
+                            lokalbot_i18n::tr("Continue if a critic fails"),
+                            None,
+                            cx,
+                        )
+                        .flex_1(),
+                    )
+                    .child(settings_row::switch(
+                        "settings.postCorrectionContinueOnCriticFailure",
+                        settings.post_correction_continue_on_critic_failure,
+                        move |on, _, cx| {
+                            critic_fail_data.update(cx, |d, cx| {
+                                d.update_settings(
+                                    |s| s.post_correction_continue_on_critic_failure = on,
+                                    cx,
+                                )
+                            });
+                        },
+                    )),
+            )
+            .child(self.endpoint_disclosure(&draft_url, cx))
+            .child(
+                h_flex()
+                    .gap(px(12.))
+                    .items_center()
+                    .child(
+                        Button::new("settings-save-post-correction")
+                            .primary()
+                            .small()
+                            .label(lokalbot_i18n::tr("Save post-correction"))
+                            .on_click(move |_, _, cx| {
+                                save_page.update(cx, |page, cx| page.save_post_correction(cx))
+                            }),
+                    )
+                    .when_some(self.models.post_correction_saved.clone(), |this, saved| {
+                        this.child(
+                            div()
+                                .text_size(ty::SECONDARY)
+                                .text_color(lb.text_secondary)
+                                .child(saved),
+                        )
+                    }),
+            );
+        vec![
+            bar,
+            self.approvals_section(cx),
+            Section::new(None).row(
+                "settings.postCorrection",
+                settings_row::content_row(
+                    "settings.postCorrection",
+                    form.py(px(4.)),
+                    self.is_focused("settings.postCorrection"),
+                    cx,
+                ),
+            ),
+        ]
+    }
+
+    fn save_post_correction(&mut self, cx: &mut Context<Self>) {
+        let url = self
+            .models
+            .post_correction_url
+            .read(cx)
+            .value()
+            .trim()
+            .to_string();
+        let raw_key = self.models.post_correction_key.read(cx).value().to_string();
+        let judge = self
+            .models
+            .post_correction_judge
+            .read(cx)
+            .value()
+            .trim()
+            .to_string();
+        let critics: Vec<String> = self
+            .models
+            .post_correction_critics
+            .read(cx)
+            .value()
+            .split(',')
+            .map(str::trim)
+            .filter(|m| !m.is_empty())
+            .map(str::to_string)
+            .collect();
+        self.models.post_correction_key_dirty = false;
+        self.data.update(cx, |data, cx| {
+            data.update_config_and_settings(
+                move |profile, settings| {
+                    let resolved = resolve_masked_api_key_edit(
+                        &profile.transcription.post_correction.api_key,
+                        &raw_key,
+                    );
+                    profile.transcription.post_correction.api_key = resolved.clone();
+                    settings.post_correction_api_key = resolved;
+                    settings.post_correction_base_url = url;
+                    if !judge.is_empty() {
+                        settings.post_correction_primary_judge_model = judge;
+                    }
+                    if !critics.is_empty() {
+                        settings.post_correction_support_critic_models = critics;
+                    }
+                    profile.sync_from_settings(settings);
+                },
+                cx,
+            );
+        });
+        self.models.post_correction_saved = Some(lokalbot_i18n::tr("Saved").into());
         cx.notify();
     }
 }
@@ -1624,5 +2155,22 @@ mod tests {
         assert_eq!(size_label(2_740_937_888), "2.7 GB");
         assert_eq!(size_label(730_895_584), "731 MB");
         assert_eq!(model_name("qwen3.5-4b"), "Qwen3.5 4B");
+    }
+
+    #[test]
+    fn masked_api_key_edit_preserves_or_replaces_correctly() {
+        assert_eq!(
+            resolve_masked_api_key_edit("sk-real-123", lokalbot_core::text::API_KEY_MASK),
+            "sk-real-123"
+        );
+        assert_eq!(
+            resolve_masked_api_key_edit("sk-real-123", "  ••••••••  "),
+            "sk-real-123"
+        );
+        assert_eq!(
+            resolve_masked_api_key_edit("sk-real-123", "sk-new-456"),
+            "sk-new-456"
+        );
+        assert_eq!(resolve_masked_api_key_edit("sk-real-123", ""), "");
     }
 }

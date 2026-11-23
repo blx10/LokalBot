@@ -7,6 +7,7 @@ pub mod audio_files;
 pub mod calendar;
 pub mod chats;
 pub mod coding_agents;
+pub mod config_profile;
 pub mod control;
 pub mod cotyping_stats;
 pub mod day_stats;
@@ -50,6 +51,7 @@ pub mod vocabulary;
 pub mod voice;
 
 pub use actions::{ActionCorrection, OutcomeProjection};
+pub use config_profile::{ConfigProfile, ConfigResolution, LoadedConfig, TranscriptionMode};
 pub use digest::parse_digest;
 pub use embeddings::{embedding_chunks, rrf_fuse};
 pub use jobs::PipelineJob;

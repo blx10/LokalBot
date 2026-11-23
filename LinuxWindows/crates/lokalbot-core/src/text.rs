@@ -97,6 +97,14 @@ pub fn redaction(text: &str) -> (String, usize) {
             output = replaced.into_owned();
         }
     }
+    let secrets = known_secrets().read().clone();
+    for secret in secrets {
+        let matches = output.matches(&secret).count();
+        if matches > 0 {
+            count += matches;
+            output = output.replace(&secret, "[REDACTED_KEY]");
+        }
+    }
     for (expression, replacement, is_match) in checked_rules() {
         let ranges: Vec<(usize, usize)> = expression
             .find_iter(&output)
@@ -113,6 +121,51 @@ pub fn redaction(text: &str) -> (String, usize) {
         }
     }
     (output, count)
+}
+
+pub const API_KEY_MASK: &str = "••••••••";
+
+pub fn mask_api_key(key: &str) -> &'static str {
+    if key.trim().is_empty() {
+        ""
+    } else {
+        API_KEY_MASK
+    }
+}
+
+pub fn is_masked_api_key(key: &str) -> bool {
+    key.trim() == API_KEY_MASK
+}
+
+fn known_secrets() -> &'static parking_lot::RwLock<Vec<String>> {
+    static KNOWN_SECRETS: std::sync::OnceLock<parking_lot::RwLock<Vec<String>>> =
+        std::sync::OnceLock::new();
+    KNOWN_SECRETS.get_or_init(|| parking_lot::RwLock::new(Vec::new()))
+}
+
+pub fn register_redacted_secrets<I, S>(secrets: I)
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut guard = known_secrets().write();
+    for secret in secrets {
+        let trimmed = secret.as_ref().trim();
+        if trimmed.chars().count() < 4
+            || trimmed == API_KEY_MASK
+            || trimmed.starts_with("[REDACTED")
+        {
+            continue;
+        }
+        if !guard.iter().any(|existing| existing == trimmed) {
+            guard.push(trimmed.to_string());
+        }
+    }
+    guard.sort_by(|a, b| b.len().cmp(&a.len()).then_with(|| a.cmp(b)));
+}
+
+pub fn clear_redacted_secrets() {
+    known_secrets().write().clear();
 }
 
 pub fn redact(text: &str) -> String {
@@ -229,4 +282,28 @@ pub fn is_iban(candidate: &str) -> bool {
         remainder = (remainder * if value > 9 { 100 } else { 10 } + value) % 97;
     }
     remainder == 1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn api_key_mask_helpers_work() {
+        assert_eq!(mask_api_key(""), "");
+        assert_eq!(mask_api_key("   "), "");
+        assert_eq!(mask_api_key("gateway-token-123"), API_KEY_MASK);
+        assert!(is_masked_api_key(API_KEY_MASK));
+        assert!(is_masked_api_key("  ••••••••  "));
+        assert!(!is_masked_api_key("sk-test"));
+    }
+
+    #[test]
+    fn registered_non_sk_secrets_are_redacted() {
+        register_redacted_secrets(["gw-custom-secret-token-998877", API_KEY_MASK, "ab"]);
+        let out = redact("POST error using gw-custom-secret-token-998877 and ••••••••");
+        assert!(!out.contains("gw-custom-secret-token-998877"));
+        assert!(out.contains("[REDACTED_KEY]"));
+        assert!(out.contains(API_KEY_MASK));
+    }
 }

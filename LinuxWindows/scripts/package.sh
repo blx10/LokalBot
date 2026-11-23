@@ -36,6 +36,7 @@ case "$(uname -s)" in
     STAGE="dist/$NAME"
     rm -rf "$STAGE" && mkdir -p "$STAGE"
     cp "$TARGET/release/lokalbot.exe" "$TARGET/release/lokalbot-cli.exe" "$STAGE/"
+    cp packaging/windows/lokalbot-config.toml "$STAGE/"
     CRT=${VC_REDIST_DIR:-$(vc_redist_dir)}
     mkdir -p "$STAGE/vc-runtime"
     for dll in msvcp140.dll vcruntime140.dll vcruntime140_1.dll; do

@@ -197,12 +197,23 @@ impl Shared {
         let client = lokalbot_ai::think::ThinkClient::new(&self.runtime, settings)?;
         Ok(match settings.summarizer_backend {
             lokalbot_core::settings::SummarizerBackend::OpenAICompatible => {
-                client.with_api_key(secrets::openai_api_key())
+                client.with_api_key(effective_openai_api_key(settings))
             }
             _ => client,
         })
     }
+}
 
+pub(crate) fn effective_openai_api_key(settings: &Settings) -> Option<String> {
+    let key = settings.think_api_key.trim();
+    if !key.is_empty() {
+        Some(key.to_string())
+    } else {
+        secrets::openai_api_key()
+    }
+}
+
+impl Shared {
     pub fn background_conditions_changed(&self) {
         if let Some(files) = self.files.lock().as_ref() {
             files.conditions_changed();
@@ -672,5 +683,17 @@ mod tests {
         );
         assert_eq!(newly_recording(Some(first), None), None);
         assert_eq!(newly_recording(None, None), None);
+    }
+
+    #[test]
+    fn config_think_api_key_takes_precedence() {
+        let settings = lokalbot_core::Settings {
+            think_api_key: "config-think-secret-key".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            super::effective_openai_api_key(&settings).as_deref(),
+            Some("config-think-secret-key")
+        );
     }
 }

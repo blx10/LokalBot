@@ -2,6 +2,9 @@ use std::path::{Path, PathBuf};
 
 pub const STORAGE_ROOT_ENV: &str = "LOKALBOT_STORAGE_ROOT";
 pub const STORAGE_ROOT_FLAG: &str = "--lokalbot-storage-root";
+pub const CONFIG_FILE_ENV: &str = "LOKALBOT_CONFIG_FILE";
+pub const CONFIG_FILE_FLAG: &str = "--config";
+pub const CONFIG_FILE_NAME: &str = "lokalbot-config.toml";
 
 const LIBRARY_FOLDER: &str = "LokalBot";
 
@@ -52,8 +55,37 @@ impl LibraryPaths {
             .unwrap_or_else(|| PathBuf::from(LIBRARY_FOLDER))
     }
 
+    pub fn config_from_args<I, S>(args: I) -> Option<PathBuf>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let mut args = args.into_iter();
+        while let Some(arg) = args.next() {
+            let arg = arg.as_ref();
+            if arg == CONFIG_FILE_FLAG {
+                return args
+                    .next()
+                    .map(|v| PathBuf::from(v.as_ref()))
+                    .filter(|p| !p.as_os_str().is_empty());
+            }
+            if let Some(value) = arg
+                .strip_prefix(CONFIG_FILE_FLAG)
+                .and_then(|r| r.strip_prefix('='))
+                && !value.is_empty()
+            {
+                return Some(PathBuf::from(value));
+            }
+        }
+        None
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    pub fn config_file(&self) -> PathBuf {
+        self.root.join(CONFIG_FILE_NAME)
     }
 
     pub fn meetings_dir(&self) -> PathBuf {
@@ -128,6 +160,24 @@ mod tests {
             Some(PathBuf::from("/tmp/b"))
         );
         assert_eq!(LibraryPaths::root_from_args(["app"]), None);
+        assert_eq!(
+            LibraryPaths::config_from_args(["app", "--config", "/tmp/c.toml"]),
+            Some(PathBuf::from("/tmp/c.toml"))
+        );
+        assert_eq!(
+            LibraryPaths::config_from_args(["app", "--config=/tmp/d.toml"]),
+            Some(PathBuf::from("/tmp/d.toml"))
+        );
+        assert_eq!(LibraryPaths::config_from_args(["app"]), None);
+    }
+
+    #[test]
+    fn config_file_resolves_inside_library_root() {
+        let paths = LibraryPaths::new("/lib");
+        assert_eq!(
+            paths.config_file(),
+            PathBuf::from("/lib/lokalbot-config.toml")
+        );
     }
 
     #[test]

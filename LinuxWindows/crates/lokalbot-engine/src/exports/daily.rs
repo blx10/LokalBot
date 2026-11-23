@@ -176,7 +176,7 @@ pub fn render(snapshot: &Snapshot, format: DailyMemoryExportFormat) -> String {
     } else {
         "_No day digest was generated._"
     };
-    [
+    let rendered = [
         opening,
         format!("## Digest\n\n{}", digest.unwrap_or(missing_digest)),
         meetings_section(&snapshot.meetings),
@@ -184,7 +184,8 @@ pub fn render(snapshot: &Snapshot, format: DailyMemoryExportFormat) -> String {
         stats_section(snapshot),
     ]
     .join("\n\n")
-        + "\n"
+        + "\n";
+    lokalbot_core::text::redact(&rendered)
 }
 
 fn meetings_section(meetings: &[MeetingReference]) -> String {
@@ -273,4 +274,26 @@ fn inline(value: &str) -> String {
         .replace('[', "\\[")
         .replace(']', "\\]")
         .replace('|', "\\|")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn daily_render_redacts_registered_secrets() {
+        lokalbot_core::text::register_redacted_secrets(["daily-secret-token-xyz"]);
+        let snapshot = Snapshot {
+            day: chrono::NaiveDate::from_ymd_opt(2026, 11, 22).unwrap(),
+            digest: Some("Digest note with daily-secret-token-xyz inside.".into()),
+            digest_is_out_of_date: false,
+            meetings: Vec::new(),
+            saved_moments: Vec::new(),
+            stats: DaySummary::default(),
+            app_usage: Vec::new(),
+        };
+        let md = render(&snapshot, DailyMemoryExportFormat::Markdown);
+        assert!(!md.contains("daily-secret-token-xyz"));
+        assert!(md.contains("[REDACTED_KEY]"));
+    }
 }

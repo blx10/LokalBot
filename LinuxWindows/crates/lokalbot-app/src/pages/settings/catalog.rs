@@ -1046,6 +1046,35 @@ pub const ENTRIES: &[Entry] = &[
         value: details,
     },
     Entry {
+        id: "settings.transcriptionMode",
+        title: "Asymmetric Multi-STT",
+        category: Models,
+        aliases: "multi stt whisper zipformer igpu cpu audit",
+        value: |s| {
+            if s.transcription_mode
+                == lokalbot_core::config_profile::TranscriptionMode::AsymmetricMultiStt
+            {
+                lokalbot_i18n::tr("Asymmetric Multi-STT").into()
+            } else {
+                lokalbot_i18n::tr("Single model").into()
+            }
+        },
+    },
+    Entry {
+        id: "settings.postCorrection",
+        title: "Post-correction",
+        category: Models,
+        aliases: "llm judge critic post correction remote endpoint",
+        value: |s| on_off(s.post_correction_enabled),
+    },
+    Entry {
+        id: "settings.configProfile",
+        title: "Configuration file",
+        category: Models,
+        aliases: "lokalbot-config.toml import export config",
+        value: details,
+    },
+    Entry {
         id: "settings.llamaBackend",
         title: "llama.cpp",
         category: Models,

@@ -316,13 +316,19 @@ pub enum PermissionsCommand {
 pub struct Client {
     paths: LibraryPaths,
     explicit_root: Option<PathBuf>,
+    explicit_config: Option<PathBuf>,
 }
 
 impl Client {
-    pub fn new(paths: LibraryPaths, explicit_root: Option<PathBuf>) -> Self {
+    pub fn new(
+        paths: LibraryPaths,
+        explicit_root: Option<PathBuf>,
+        explicit_config: Option<PathBuf>,
+    ) -> Self {
         Self {
             paths,
             explicit_root,
+            explicit_config,
         }
     }
 
@@ -391,6 +397,11 @@ impl Client {
             command
                 .arg(lokalbot_core::paths::STORAGE_ROOT_FLAG)
                 .arg(root);
+        }
+        if let Some(config) = &self.explicit_config {
+            command
+                .arg(lokalbot_core::paths::CONFIG_FILE_FLAG)
+                .arg(config);
         }
         detach(&mut command);
         command.spawn().map(drop).map_err(|err| {
@@ -1358,7 +1369,7 @@ mod tests {
     #[test]
     fn the_client_refuses_before_connecting_while_settings_access_is_off() {
         let dir = tempfile::tempdir().unwrap();
-        let client = Client::new(LibraryPaths::new(dir.path()), None);
+        let client = Client::new(LibraryPaths::new(dir.path()), None, None);
         let error = client
             .request(protocol::METHOD_HELLO, None, true, 1.0)
             .unwrap_err();
@@ -1370,7 +1381,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let paths = LibraryPaths::new(dir.path());
         access::set_settings_control(&paths, true).unwrap();
-        let client = Client::new(paths, None);
+        let client = Client::new(paths, None, None);
         let error = client
             .request(protocol::METHOD_HELLO, None, false, 1.0)
             .unwrap_err();

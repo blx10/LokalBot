@@ -468,7 +468,7 @@ pub fn review_once(
         let client = lokalbot_ai::think::ThinkClient::new(&runtime, settings)?;
         let think = match settings.summarizer_backend {
             lokalbot_core::settings::SummarizerBackend::OpenAICompatible => {
-                client.with_api_key(crate::secrets::openai_api_key())
+                client.with_api_key(crate::effective_openai_api_key(settings))
             }
             _ => client,
         };

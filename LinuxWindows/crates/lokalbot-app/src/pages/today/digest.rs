@@ -72,6 +72,7 @@ pub(crate) fn export_markdown(
         let Ok(Ok(Some(path))) = receiver.await else {
             return;
         };
+        let markdown = lokalbot_core::text::redact(&markdown);
         let result = cx
             .background_spawn(async move { std::fs::write(&path, markdown) })
             .await;

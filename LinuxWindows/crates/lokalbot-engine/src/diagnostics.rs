@@ -209,7 +209,13 @@ fn write_archive(
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default();
             archive.start_file(format!("{TOP_FOLDER}/{folder}/{name}"), options)?;
-            archive.write_all(&bytes)?;
+            if folder == "logs"
+                && let Ok(text) = std::str::from_utf8(&bytes)
+            {
+                archive.write_all(lokalbot_core::text::redact(text).as_bytes())?;
+            } else {
+                archive.write_all(&bytes)?;
+            }
             copied += 1;
         }
         Ok(copied)

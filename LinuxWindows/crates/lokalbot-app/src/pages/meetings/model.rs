@@ -838,7 +838,7 @@ pub fn meeting_markdown(doc: &MeetingDoc) -> String {
         out.push_str(&transcript.markdown());
         out.push('\n');
     }
-    out
+    lokalbot_core::text::redact(&out)
 }
 
 pub fn transcript_text(doc: &MeetingDoc) -> String {
@@ -906,5 +906,23 @@ mod tests {
             "Unresolved speaker"
         );
         assert_eq!(display_label("Maya", false), "Maya");
+    }
+
+    #[test]
+    fn meeting_markdown_redacts_registered_secrets() {
+        lokalbot_core::text::register_redacted_secrets(["meeting-secret-token-xyz"]);
+        let tmp = tempfile::tempdir().unwrap();
+        let library = Library::open(lokalbot_core::LibraryPaths::new(tmp.path())).unwrap();
+        let meeting = library
+            .create_meeting("Sync", "Zoom", lokalbot_core::time::now_seconds())
+            .unwrap();
+        library
+            .save_notes(&meeting, "Note containing meeting-secret-token-xyz")
+            .unwrap();
+        library.save_summary(&meeting, "Summary").unwrap();
+        let doc = load(&library, meeting);
+        let md = meeting_markdown(&doc);
+        assert!(!md.contains("meeting-secret-token-xyz"));
+        assert!(md.contains("[REDACTED_KEY]"));
     }
 }

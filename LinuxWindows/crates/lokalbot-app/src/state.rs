@@ -1,9 +1,10 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::Instant;
 
 use chrono::{DateTime, Utc};
 use gpui_kit::{App, AppContext as _, Context, Entity, Global, SharedString};
-use lokalbot_core::{ActionStatus, Library, Meeting, Settings};
+use lokalbot_core::{ActionStatus, ConfigProfile, Library, LoadedConfig, Meeting, Settings};
 use uuid::Uuid;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -244,6 +245,8 @@ pub struct MeetingFocus {
 pub struct AppData {
     pub library: Library,
     pub settings: Settings,
+    pub config_path: Option<PathBuf>,
+    pub config_profile: Option<ConfigProfile>,
     pub meetings: Vec<Meeting>,
     pub meetings_loaded: bool,
     reloads_started: u64,
@@ -432,7 +435,16 @@ impl AppData {
         cx.global::<AppHandle>().0.clone()
     }
 
-    pub fn new(library: Library, mut settings: Settings) -> Self {
+    #[allow(dead_code)]
+    pub fn new(library: Library, settings: Settings) -> Self {
+        Self::with_config(library, settings, None)
+    }
+
+    pub fn with_config(
+        library: Library,
+        mut settings: Settings,
+        loaded_config: Option<LoadedConfig>,
+    ) -> Self {
         let normalized = settings.normalize_dreaming_boundary(chrono::Local::now().date_naive());
         let autocomplete = settings.cotyping_built_in_model_id.clone();
         let adopted = lokalbot_ai::catalog::adopt_default_autocomplete(&mut settings);
@@ -444,12 +456,18 @@ impl AppData {
         {
             log::error!("saving settings failed: {err}");
         }
+        let (config_path, config_profile) = match loaded_config {
+            Some(loaded) => (Some(loaded.resolution.active_path), Some(loaded.profile)),
+            None => (None, None),
+        };
         let (inference_label, remote_hosts) = inference_presentation(&settings);
         let privacy = PrivacyLine::new(&settings);
         let settings_category = SettingsCategory::from_key(&settings.settings_page);
         Self {
             library,
             settings,
+            config_path,
+            config_profile,
             meetings: Vec::new(),
             meetings_loaded: false,
             reloads_started: 0,
@@ -1091,6 +1109,40 @@ impl AppData {
         if self.settings == before {
             return;
         }
+        self.finish_settings_update(&before, true, cx);
+    }
+
+    pub fn update_config_and_settings(
+        &mut self,
+        change: impl FnOnce(&mut ConfigProfile, &mut Settings),
+        cx: &mut Context<Self>,
+    ) {
+        let before = self.settings.clone();
+        let mut profile = self
+            .config_profile
+            .clone()
+            .unwrap_or_else(|| ConfigProfile::from_settings(&self.settings, None));
+        change(&mut profile, &mut self.settings);
+        profile.apply_to_settings(&mut self.settings);
+        self.settings
+            .normalize_dreaming_boundary(chrono::Local::now().date_naive());
+        self.config_profile = Some(profile);
+        if self.config_path.is_none() {
+            self.config_path = Some(self.library.paths().config_file());
+        }
+        self.finish_settings_update(&before, false, cx);
+    }
+
+    fn finish_settings_update(
+        &mut self,
+        before: &Settings,
+        sync_profile: bool,
+        cx: &mut Context<Self>,
+    ) {
+        lokalbot_core::text::register_redacted_secrets([
+            self.settings.post_correction_api_key.as_str(),
+            self.settings.think_api_key.as_str(),
+        ]);
         if before.app_language != self.settings.app_language {
             crate::i18n::apply(&self.settings.app_language, cx);
         }
@@ -1101,9 +1153,44 @@ impl AppData {
         self.privacy = PrivacyLine::new(&self.settings);
         let path = self.library.paths().settings_file();
         let settings = self.settings.clone();
+        let should_save_config =
+            self.config_profile.is_some() || config_fields_changed(before, &self.settings);
+        let config_to_save = if should_save_config {
+            let mut profile = self
+                .config_profile
+                .clone()
+                .unwrap_or_else(|| ConfigProfile::from_settings(&self.settings, None));
+            if sync_profile {
+                profile.sync_from_settings(&self.settings);
+            }
+            self.config_profile = Some(profile.clone());
+            let target = self
+                .config_path
+                .clone()
+                .unwrap_or_else(|| self.library.paths().config_file());
+            let fallback = self.library.paths().config_file();
+            Some((profile, target, fallback))
+        } else {
+            None
+        };
         cx.background_spawn(async move {
             if let Err(err) = settings.save(&path) {
                 log::error!("saving settings failed: {err}");
+            }
+            if let Some((profile, target, fallback)) = config_to_save
+                && let Err(err) = profile.save(&target)
+            {
+                let msg = lokalbot_core::text::redact(&format!("{err:#}"));
+                log::warn!(
+                    "saving config profile failed at {}: {msg}",
+                    target.display()
+                );
+                if target != fallback
+                    && let Err(fallback_err) = profile.save(&fallback)
+                {
+                    let fallback_msg = lokalbot_core::text::redact(&format!("{fallback_err:#}"));
+                    log::warn!("saving fallback config profile failed: {fallback_msg}");
+                }
             }
         })
         .detach();
@@ -1239,6 +1326,17 @@ pub fn inference_presentation(settings: &Settings) -> (SharedString, Vec<SharedS
     {
         hosts.push(host.into());
     }
+    if settings.post_correction_enabled
+        && !settings.post_correction_base_url.trim().is_empty()
+        && !lokalbot_core::access::is_loopback_url(&settings.post_correction_base_url)
+    {
+        let host = lokalbot_core::access::origin_of(&settings.post_correction_base_url)
+            .map(|o| o.split_once("://").map(|(_, h)| h.to_string()).unwrap_or(o))
+            .unwrap_or_else(|| settings.post_correction_base_url.clone());
+        if !hosts.iter().any(|known| known.as_ref() == host) {
+            hosts.push(host.into());
+        }
+    }
     if hosts.is_empty() {
         (lokalbot_i18n::tr("AI: on this PC").into(), hosts)
     } else {
@@ -1254,7 +1352,15 @@ pub enum PrivacyLine {
 
 impl PrivacyLine {
     pub fn new(settings: &Settings) -> Self {
-        let blocked = !lokalbot_ai::think::allows_automatic_main_inference(settings);
+        let post_correction_blocked = settings.post_correction_enabled
+            && !settings.post_correction_base_url.trim().is_empty()
+            && lokalbot_core::access::remote_block_reason(
+                &settings.post_correction_base_url,
+                &settings.approved_remote_inference_origins,
+            )
+            .is_some();
+        let blocked = !lokalbot_ai::think::allows_automatic_main_inference(settings)
+            || post_correction_blocked;
         let hosts = remote_ai_hosts(settings);
         if hosts.is_empty() && !blocked {
             PrivacyLine::Local
@@ -1311,7 +1417,37 @@ pub fn remote_ai_hosts(settings: &Settings) -> Vec<String> {
     {
         add(host);
     }
+    if settings.post_correction_enabled
+        && !settings.post_correction_base_url.trim().is_empty()
+        && !lokalbot_core::access::is_loopback_url(&settings.post_correction_base_url)
+        && let Some(host) = lokalbot_core::access::host_of(&settings.post_correction_base_url)
+    {
+        add(host);
+    }
     hosts
+}
+
+fn config_fields_changed(before: &Settings, after: &Settings) -> bool {
+    before.transcription_mode != after.transcription_mode
+        || before.live_preview_during_meeting != after.live_preview_during_meeting
+        || before.transcription_save_audit_log != after.transcription_save_audit_log
+        || before.transcription_cpu_threads != after.transcription_cpu_threads
+        || before.transcription_auto_fallback_to_cpu != after.transcription_auto_fallback_to_cpu
+        || before.transcription_models != after.transcription_models
+        || before.post_correction_enabled != after.post_correction_enabled
+        || before.post_correction_base_url != after.post_correction_base_url
+        || before.post_correction_primary_judge_model != after.post_correction_primary_judge_model
+        || before.post_correction_support_critic_models
+            != after.post_correction_support_critic_models
+        || before.post_correction_segments_per_batch != after.post_correction_segments_per_batch
+        || before.post_correction_request_timeout_sec != after.post_correction_request_timeout_sec
+        || before.post_correction_max_concurrent_batches
+            != after.post_correction_max_concurrent_batches
+        || before.post_correction_continue_on_critic_failure
+            != after.post_correction_continue_on_critic_failure
+        || before.disable_local_llama_server != after.disable_local_llama_server
+        || before.post_correction_api_key != after.post_correction_api_key
+        || before.think_api_key != after.think_api_key
 }
 
 pub fn open_user_action_count(threads: &[lokalbot_core::ActionThread]) -> usize {
@@ -1431,6 +1567,32 @@ mod tests {
         assert_eq!(remote_ai_hosts(&think), vec!["api.openai.com".to_string()]);
         think.cotyping_backend = CotypingBackend::OnDevice;
         assert_eq!(remote_ai_hosts(&think), vec!["api.openai.com".to_string()]);
+    }
+
+    #[test]
+    fn post_correction_remote_host_updates_privacy_line() {
+        let mut settings = Settings {
+            post_correction_enabled: true,
+            post_correction_base_url: "https://pc-gateway.example/v1".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            PrivacyLine::new(&settings),
+            PrivacyLine::Split {
+                blocked: true,
+                hosts: vec!["pc-gateway.example".into()],
+            }
+        );
+        settings
+            .approved_remote_inference_origins
+            .push("https://pc-gateway.example".into());
+        assert_eq!(
+            PrivacyLine::new(&settings),
+            PrivacyLine::Split {
+                blocked: false,
+                hosts: vec!["pc-gateway.example".into()],
+            }
+        );
     }
 
     #[test]

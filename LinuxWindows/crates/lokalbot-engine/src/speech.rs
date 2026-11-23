@@ -49,7 +49,7 @@ fn server_client(settings: &Settings) -> Result<Client> {
         &settings.remote_transcription_base_url,
         &settings.openai_base_url,
         &crate::secrets::remote_transcription_api_key().unwrap_or_default(),
-        || crate::secrets::openai_api_key().unwrap_or_default(),
+        || crate::effective_openai_api_key(settings).unwrap_or_default(),
     );
     Ok(Client::new(
         &RemoteTranscription::from_settings(settings),

@@ -31,6 +31,14 @@ pub struct Cli {
     #[arg(long = "lokalbot-storage-root", global = true, hide = true)]
     pub storage_root: Option<std::path::PathBuf>,
 
+    #[arg(
+        long = "config",
+        global = true,
+        value_name = "PATH",
+        help = "Path to lokalbot-config.toml."
+    )]
+    pub config: Option<std::path::PathBuf>,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -403,10 +411,12 @@ fn day_or_error(value: &str, option: &str) -> Result<chrono::NaiveDate, CliError
 
 pub fn run(cli: Cli) -> Result<String, CliError> {
     let paths = LibraryPaths::resolve(cli.storage_root.as_deref());
-    let client = || control::Client::new(paths.clone(), cli.storage_root.clone());
-    lokalbot_core::SpeakerAttribution::set_microphone_is_user(
-        lokalbot_core::Settings::load(&paths.settings_file()).microphone_is_user,
-    );
+    let (settings, _) =
+        lokalbot_core::config_profile::load_effective_settings(cli.config.as_deref(), &paths)
+            .map_err(|err| validation(format!("{err:#}")))?;
+    let client =
+        || control::Client::new(paths.clone(), cli.storage_root.clone(), cli.config.clone());
+    lokalbot_core::SpeakerAttribution::set_microphone_is_user(settings.microphone_is_user);
     match cli.command {
         Command::Brief => {
             let session = Session::open(paths)?;
@@ -958,5 +968,39 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.kind(), ErrorKind::MissingSubcommand);
         assert!(Cli::try_parse_from(["lokalbot-cli", "list", "--version"]).is_err());
+    }
+
+    #[test]
+    fn config_flag_parses_globally_with_subcommands() {
+        let parsed = Cli::try_parse_from([
+            "lokalbot-cli",
+            "--config",
+            "/tmp/custom-config.toml",
+            "--lokalbot-storage-root",
+            "/tmp/library",
+            "brief",
+        ])
+        .unwrap();
+        assert_eq!(
+            parsed.config,
+            Some(std::path::PathBuf::from("/tmp/custom-config.toml"))
+        );
+        assert_eq!(
+            parsed.storage_root,
+            Some(std::path::PathBuf::from("/tmp/library"))
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.toml");
+        let cli = Cli::try_parse_from([
+            "lokalbot-cli",
+            "--config",
+            missing.to_str().unwrap(),
+            "--lokalbot-storage-root",
+            dir.path().to_str().unwrap(),
+            "brief",
+        ])
+        .unwrap();
+        assert!(run(cli).is_err());
     }
 }

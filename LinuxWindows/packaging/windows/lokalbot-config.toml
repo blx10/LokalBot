@@ -1,0 +1,36 @@
+schema_version = 1
+
+[deployment]
+auto_approve_configured_origins = true
+skip_onboarding_wizard = true
+
+[transcription]
+mode = "asymmetric_multi_stt"
+language = "tr"
+live_preview_during_meeting = false
+save_audit_log = true
+cpu_threads = 6
+auto_fallback_to_cpu = true
+
+[transcription.models]
+primary = { id = "whisper-turbo", device = "igpu" }
+tr_backup = { id = "whisper-turbo-tr-khan", device = "igpu" }
+fast_helper = { id = "zipformer-oayk", device = "cpu" }
+
+[transcription.post_correction]
+enabled = false
+base_url = ""
+api_key = ""
+primary_judge_model = "Qwen3.8-27B"
+support_critic_models = ["gemma-4-31B-it", "gpt-oss-120b"]
+segments_per_batch = 5
+request_timeout_sec = 120
+max_concurrent_batches = 2
+continue_on_critic_failure = true
+
+[think]
+backend = "built_in"
+base_url = ""
+api_key = ""
+model = "Qwen3.8-27B"
+disable_local_llama_server = false

@@ -532,13 +532,16 @@ pub fn restart(cx: &mut App) {
 
 fn relaunch_args() -> Vec<OsString> {
     let args: Vec<String> = std::env::args().collect();
-    match lokalbot_core::LibraryPaths::root_from_args(&args) {
-        Some(root) => vec![
-            lokalbot_core::paths::STORAGE_ROOT_FLAG.into(),
-            root.into_os_string(),
-        ],
-        None => Vec::new(),
+    let mut forwarded = Vec::new();
+    if let Some(root) = lokalbot_core::LibraryPaths::root_from_args(&args) {
+        forwarded.push(lokalbot_core::paths::STORAGE_ROOT_FLAG.into());
+        forwarded.push(root.into_os_string());
     }
+    if let Some(config) = lokalbot_core::LibraryPaths::config_from_args(&args) {
+        forwarded.push(lokalbot_core::paths::CONFIG_FILE_FLAG.into());
+        forwarded.push(config.into_os_string());
+    }
+    forwarded
 }
 
 fn check_error(err: &UpdateError) -> SharedString {

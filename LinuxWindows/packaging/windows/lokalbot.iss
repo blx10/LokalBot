@@ -64,6 +64,7 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 [Files]
 Source: "{#SourceDir}\lokalbot.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\lokalbot-cli.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#SourceDir}\lokalbot-config.toml"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\lokalbot-cli.exe"; DestDir: "{app}\bin"; Flags: ignoreversion; Tasks: addtopath
 Source: "{#SourceDir}\LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion

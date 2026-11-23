@@ -46,6 +46,7 @@ actions!(
 #[derive(Default)]
 struct Options {
     storage_root: Option<std::path::PathBuf>,
+    config_path: Option<std::path::PathBuf>,
     section: Option<Section>,
     settings_category: Option<state::SettingsCategory>,
     window: Option<String>,
@@ -58,8 +59,13 @@ struct Options {
 
 fn parse_options() -> Options {
     let args: Vec<String> = std::env::args().collect();
+    parse_options_from(&args)
+}
+
+fn parse_options_from(args: &[String]) -> Options {
     let mut options = Options {
-        storage_root: LibraryPaths::root_from_args(&args),
+        storage_root: LibraryPaths::root_from_args(args),
+        config_path: LibraryPaths::config_from_args(args),
         ..Default::default()
     };
     options.autostart = args
@@ -76,7 +82,10 @@ fn parse_options() -> Options {
     while let Some((index, arg)) = rest.next() {
         if matches!(
             arg.as_str(),
-            "--page" | "--window" | lokalbot_core::paths::STORAGE_ROOT_FLAG
+            "--page"
+                | "--window"
+                | lokalbot_core::paths::STORAGE_ROOT_FLAG
+                | lokalbot_core::paths::CONFIG_FILE_FLAG
         ) {
             rest.next();
         } else if !arg.starts_with("--") {
@@ -117,6 +126,18 @@ fn init_logging(paths: &LibraryPaths) {
     let mut builder = env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or("info,zbus=warn,tracing=warn"),
     );
+    builder.format(|buf, record| {
+        use std::io::Write as _;
+        let message = lokalbot_core::text::redact(&format!("{}", record.args()));
+        writeln!(
+            buf,
+            "[{} {} {}] {}",
+            buf.timestamp(),
+            record.level(),
+            record.target(),
+            message
+        )
+    });
     if let Some(file) = open_log_file(&paths.logs_dir()) {
         builder.target(env_logger::Target::Pipe(Box::new(Tee(file))));
     }
@@ -185,7 +206,11 @@ fn main() {
         return;
     }
     if let Some(command) = headless::parse(&std::env::args().collect::<Vec<_>>()) {
-        std::process::exit(headless::run(&command, &paths));
+        std::process::exit(headless::run_with_config(
+            &command,
+            &paths,
+            options.config_path.as_deref(),
+        ));
     }
     if std::env::args().any(|arg| arg == "--seed-demo") {
         match lokalbot_core::demo::seed(&paths, chrono::Utc::now()) {
@@ -228,7 +253,24 @@ fn main() {
             std::process::exit(1);
         }
     };
-    let settings = Settings::load(&paths.settings_file());
+    let (settings, loaded_config) = match lokalbot_core::config_profile::load_effective_settings(
+        options.config_path.as_deref(),
+        &paths,
+    ) {
+        Ok(result) => result,
+        Err(err) => {
+            let message = lokalbot_core::text::redact(&format!("{err:#}"));
+            if options.config_path.is_some()
+                || std::env::var_os(lokalbot_core::paths::CONFIG_FILE_ENV)
+                    .is_some_and(|v| !v.is_empty())
+            {
+                eprintln!("LokalBot could not load config file: {message}");
+                std::process::exit(1);
+            }
+            log::warn!("ignoring unreadable lokalbot-config.toml: {message}");
+            (Settings::load(&paths.settings_file()), None)
+        }
+    };
     log::info!("library: {}", paths.root().display());
     if instance.is_some() {
         let recovered = lokalbot_engine::recover_unfinished_recordings(&library, &settings);
@@ -249,7 +291,7 @@ fn main() {
             assets::load_fonts(cx);
             cx.set_app_identity("com.lokalbot.LokalBot", "LokalBot");
 
-            let data = cx.new(|_| AppData::new(library, settings));
+            let data = cx.new(|_| AppData::with_config(library, settings, loaded_config));
             data.update(cx, |data, cx| {
                 data.refresh_audio_inputs(cx);
                 data.refresh_access(cx);
@@ -544,7 +586,8 @@ fn apply_launch_at_login(data: &Entity<AppData>, cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::{stays_in_tray, wants_version};
+    use super::{parse_options_from, stays_in_tray, wants_version};
+    use lokalbot_platform::IpcCommand;
 
     #[test]
     fn only_a_login_start_with_a_tray_stays_out_of_sight() {
@@ -574,5 +617,22 @@ mod tests {
         assert!(!wants_version(&args(&["lokalbot"])));
         assert!(!wants_version(&args(&["lokalbot", "show", "--autostart"])));
         assert!(!wants_version(&args(&["lokalbot", "--versions", "-v"])));
+    }
+
+    #[test]
+    fn config_flag_parses_without_stealing_ipc_command() {
+        let opts = parse_options_from(&args(&["lokalbot", "--config", "/tmp/cfg.toml", "show"]));
+        assert_eq!(
+            opts.config_path,
+            Some(std::path::PathBuf::from("/tmp/cfg.toml"))
+        );
+        assert_eq!(opts.command, Some(IpcCommand::Show));
+
+        let opts_eq = parse_options_from(&args(&["lokalbot", "--config=/tmp/other.toml"]));
+        assert_eq!(
+            opts_eq.config_path,
+            Some(std::path::PathBuf::from("/tmp/other.toml"))
+        );
+        assert_eq!(opts_eq.command, None);
     }
 }

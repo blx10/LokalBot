@@ -410,7 +410,7 @@ pub fn get_markdown(session: &Session, meeting: &Meeting, options: &GetOptions) 
             lines.push(String::new());
         }
     }
-    lines.join("\n")
+    lokalbot_core::text::redact(&lines.join("\n"))
 }
 
 pub fn transcript_window(

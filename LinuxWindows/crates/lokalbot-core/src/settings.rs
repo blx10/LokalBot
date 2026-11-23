@@ -2,6 +2,7 @@ use std::{collections::HashSet, path::Path};
 
 use serde::{Deserialize, Serialize};
 
+use crate::config_profile::{TranscriptionMode, TranscriptionModelsConfig};
 use crate::model::activity::ScreenContextMode;
 
 const DREAMING_FIRST_ELIGIBLE_KEY: &str = "dreamingFirstEligibleDayKey";
@@ -67,6 +68,26 @@ pub struct Settings {
     pub transcription_language: String,
     pub transcription_prompt: String,
     pub auto_transcription_vocabulary: bool,
+    pub transcription_mode: TranscriptionMode,
+    pub live_preview_during_meeting: bool,
+    pub transcription_save_audit_log: bool,
+    pub transcription_cpu_threads: usize,
+    pub transcription_auto_fallback_to_cpu: bool,
+    pub transcription_models: TranscriptionModelsConfig,
+    pub post_correction_enabled: bool,
+    #[serde(rename = "postCorrectionBaseURL")]
+    pub post_correction_base_url: String,
+    pub post_correction_primary_judge_model: String,
+    pub post_correction_support_critic_models: Vec<String>,
+    pub post_correction_segments_per_batch: usize,
+    pub post_correction_request_timeout_sec: u64,
+    pub post_correction_max_concurrent_batches: usize,
+    pub post_correction_continue_on_critic_failure: bool,
+    pub disable_local_llama_server: bool,
+    #[serde(skip)]
+    pub post_correction_api_key: String,
+    #[serde(skip)]
+    pub think_api_key: String,
     pub summarizer_backend: SummarizerBackend,
     #[serde(rename = "builtInModelID")]
     pub built_in_model_id: String,
@@ -283,6 +304,26 @@ impl Default for Settings {
             transcription_language: "auto".into(),
             transcription_prompt: String::new(),
             auto_transcription_vocabulary: true,
+            transcription_mode: TranscriptionMode::Single,
+            live_preview_during_meeting: false,
+            transcription_save_audit_log: true,
+            transcription_cpu_threads: 6,
+            transcription_auto_fallback_to_cpu: true,
+            transcription_models: TranscriptionModelsConfig::default(),
+            post_correction_enabled: false,
+            post_correction_base_url: String::new(),
+            post_correction_primary_judge_model: "Qwen3.8-27B".into(),
+            post_correction_support_critic_models: vec![
+                "gemma-4-31B-it".into(),
+                "gpt-oss-120b".into(),
+            ],
+            post_correction_segments_per_batch: 5,
+            post_correction_request_timeout_sec: 120,
+            post_correction_max_concurrent_batches: 2,
+            post_correction_continue_on_critic_failure: true,
+            disable_local_llama_server: false,
+            post_correction_api_key: String::new(),
+            think_api_key: String::new(),
             summarizer_backend: SummarizerBackend::BuiltIn,
             built_in_model_id: "qwen3.5-4b-lokalbot-v4".into(),
             ollama_base_url: "http://localhost:11434".into(),
