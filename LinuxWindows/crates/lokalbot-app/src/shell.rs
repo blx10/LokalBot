@@ -229,11 +229,29 @@ impl Workspace {
                 .child(
                     v_flex()
                         .child(
-                            div()
-                                .text_size(ty::BODY)
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(lb.text)
-                                .child("LokalBot"),
+                            h_flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .child(
+                                    div()
+                                        .text_size(ty::BODY)
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(lb.text)
+                                        .child("LokalBot"),
+                                )
+                                .child(
+                                    div()
+                                        .id("sidebar-origin-badge")
+                                        .flex_none()
+                                        .px(px(6.))
+                                        .py(px(1.))
+                                        .rounded_full()
+                                        .bg(lb.accent_wash)
+                                        .text_size(ty::SMALL)
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .text_color(lb.accent_text)
+                                        .child(env!("LOKALBOT_BUILD_ORIGIN")),
+                                ),
                         )
                         .child(
                             div()

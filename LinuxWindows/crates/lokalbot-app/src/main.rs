@@ -438,7 +438,10 @@ pub(crate) fn open_main_window(data: Entity<AppData>, cx: &mut App) {
         ..TitleBar::window_options()
     };
     let result = gpui_kit::open_window(options, cx, |window, cx| {
-        window.set_window_title("LokalBot");
+        window.set_window_title(&format!(
+            "LokalBot ({})",
+            env!("LOKALBOT_BUILD_ORIGIN_DETAIL")
+        ));
         apply_appearance(&data, window, cx);
         let observed = data.clone();
         window
@@ -634,5 +637,15 @@ mod tests {
             Some(std::path::PathBuf::from("/tmp/other.toml"))
         );
         assert_eq!(opts_eq.command, None);
+    }
+
+    #[test]
+    fn origin_build_metadata_is_embedded() {
+        let badge = env!("LOKALBOT_BUILD_ORIGIN");
+        let detail = env!("LOKALBOT_BUILD_ORIGIN_DETAIL");
+        assert!(!badge.is_empty());
+        assert!(!detail.is_empty());
+        assert!(badge.starts_with("origin"));
+        assert!(detail.starts_with("origin"));
     }
 }
