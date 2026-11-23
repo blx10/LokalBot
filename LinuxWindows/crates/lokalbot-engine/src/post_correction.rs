@@ -952,4 +952,100 @@ disable_local_llama_server = true
                 .is_file()
         );
     }
+
+    #[test]
+    fn config_profile_apply_to_settings_overrides_stale_settings_other() {
+        let mut settings = Settings::default();
+        settings.other.insert(
+            "postCorrection".into(),
+            json!({
+                "enabled": false,
+                "baseUrl": "http://127.0.0.1:9/stale",
+                "apiKey": "stale-pc-key"
+            }),
+        );
+        settings.other.insert("saveAuditLog".into(), json!(false));
+        settings
+            .other
+            .insert("disableLocalLlamaServer".into(), json!(true));
+        settings
+            .other
+            .insert("thinkApiKey".into(), json!("stale-think-key"));
+        settings.other.insert(
+            "transcription".into(),
+            json!({
+                "mode": "single",
+                "save_audit_log": false,
+                "post_correction": { "enabled": false }
+            }),
+        );
+
+        let enable_toml = r#"
+schema_version = 1
+
+[transcription]
+mode = "asymmetric_multi_stt"
+save_audit_log = true
+
+[transcription.post_correction]
+enabled = true
+base_url = "http://127.0.0.1:18080/v1"
+api_key = "fresh-pc-key"
+primary_judge_model = "Qwen3.8-27B"
+support_critic_models = ["gemma-4-31B-it", "gpt-oss-120b"]
+segments_per_batch = 5
+request_timeout_sec = 30
+max_concurrent_batches = 2
+continue_on_critic_failure = true
+
+[think]
+backend = "openai_compatible"
+base_url = "http://127.0.0.1:18080/v1"
+api_key = ""
+model = "Qwen3.8-27B"
+disable_local_llama_server = false
+"#;
+        let profile =
+            lokalbot_core::config_profile::ConfigProfile::import_toml(enable_toml, None).unwrap();
+        profile.apply_to_settings(&mut settings);
+
+        let pc = post_correction_config(&settings).unwrap();
+        assert!(pc.enabled);
+        assert_eq!(pc.base_url, "http://127.0.0.1:18080/v1");
+        assert_eq!(pc.api_key, "fresh-pc-key");
+        assert!(save_audit_log(&settings));
+        assert!(!local_llama_server_disabled(&settings));
+        assert_eq!(think_api_key(&settings), None);
+        assert!(crate::speech::MultiSttConfig::from_settings(&settings).enabled);
+
+        settings.other.insert(
+            "postCorrection".into(),
+            json!({ "enabled": true, "baseUrl": "http://127.0.0.1:9/stale" }),
+        );
+        settings.other.insert("saveAuditLog".into(), json!(true));
+        let disable_toml = r#"
+schema_version = 1
+
+[transcription]
+mode = "single"
+save_audit_log = false
+
+[transcription.post_correction]
+enabled = false
+base_url = ""
+api_key = ""
+
+[think]
+backend = "built_in"
+disable_local_llama_server = true
+"#;
+        let disable_profile =
+            lokalbot_core::config_profile::ConfigProfile::import_toml(disable_toml, None).unwrap();
+        disable_profile.apply_to_settings(&mut settings);
+
+        assert!(post_correction_config(&settings).is_none());
+        assert!(!save_audit_log(&settings));
+        assert!(local_llama_server_disabled(&settings));
+        assert!(!crate::speech::MultiSttConfig::from_settings(&settings).enabled);
+    }
 }

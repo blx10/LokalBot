@@ -651,9 +651,6 @@ impl MeetingsPage {
             .rounded(px(4.))
             .cursor_pointer()
             .hover(|s| s.bg(lb.hover))
-            .tooltip(|window, cx| {
-                Tooltip::new(lokalbot_i18n::tr("Show in transcript")).build(window, cx)
-            })
             .on_click(cx.listener(move |this, _, _, cx| this.show_in_transcript(start, cx)))
             .child(ui::status_dot(super::speaker_color(line.color, cx), px(7.)))
             .child(
@@ -2437,5 +2434,11 @@ mod tests {
         assert_eq!(caption_at(&doc, 4.9), Some(0));
         assert_eq!(caption_at(&doc, 5.0), Some(1));
         assert_eq!(caption_at(&doc, 9.0), Some(1));
+    }
+
+    #[test]
+    fn compact_waveform_height_matches_expected_scale() {
+        assert_eq!(crate::ui::waveform::HEIGHT, px(60.));
+        assert_eq!(crate::ui::waveform::COMPACT_HEIGHT, px(36.));
     }
 }

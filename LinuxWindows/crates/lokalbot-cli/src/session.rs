@@ -474,7 +474,18 @@ pub struct SearchHit {
 }
 
 pub fn search_json(hits: &[SearchHit]) -> String {
-    json::pretty(&hits, true)
+    let redacted: Vec<SearchHit> = hits
+        .iter()
+        .map(|hit| SearchHit {
+            meeting_id: hit.meeting_id.clone(),
+            meeting_title: lokalbot_core::text::redact(&hit.meeting_title),
+            match_kind: hit.match_kind.clone(),
+            snippet: lokalbot_core::text::redact(&hit.snippet),
+            timestamp: hit.timestamp.clone(),
+            sample: hit.sample,
+        })
+        .collect();
+    json::pretty(&redacted, true)
 }
 
 pub fn search_table(hits: &[SearchHit]) -> String {
@@ -484,12 +495,18 @@ pub fn search_table(hits: &[SearchHit]) -> String {
     let rows: Vec<Vec<String>> = hits
         .iter()
         .map(|hit| {
-            let snippet: String = hit.snippet.replace('\n', " ").chars().take(80).collect();
+            let title = lokalbot_core::text::redact(&hit.meeting_title);
+            let snippet_redacted = lokalbot_core::text::redact(&hit.snippet);
+            let snippet: String = snippet_redacted
+                .replace('\n', " ")
+                .chars()
+                .take(80)
+                .collect();
             vec![
                 hit.meeting_id.clone(),
                 hit.match_kind.clone(),
                 hit.timestamp.clone().unwrap_or_else(|| "—".into()),
-                format!("{} — {snippet}", hit.meeting_title),
+                format!("{title} — {snippet}"),
             ]
         })
         .collect();
@@ -668,5 +685,25 @@ mod tests {
         let list_t = list_table(&session, &[meeting], true);
         assert!(!list_t.contains("987654"));
         assert!(list_t.contains("[REDACTED_KEY]"));
+
+        let hits = vec![SearchHit {
+            meeting_id: "m1".into(),
+            meeting_title: "Sync gw_custom_secret_987654".into(),
+            match_kind: "transcript".into(),
+            snippet: "Token is gw_custom_secret_987654 here".into(),
+            timestamp: Some("00:00:01".into()),
+            sample: None,
+        }];
+        let search_j = search_json(&hits);
+        assert!(!search_j.contains("987654"));
+        assert!(!search_j.contains("gw_custom_secret"));
+        let search_parsed: Vec<serde_json::Value> = serde_json::from_str(&search_j).unwrap();
+        assert_eq!(search_parsed[0]["meeting_title"], "Sync [REDACTED_KEY]");
+        assert_eq!(search_parsed[0]["snippet"], "Token is [REDACTED_KEY] here");
+
+        let search_t = search_table(&hits);
+        assert!(!search_t.contains("987654"));
+        assert!(!search_t.contains("gw_custom_secret"));
+        assert!(search_t.contains("[REDACTED_KEY]"));
     }
 }

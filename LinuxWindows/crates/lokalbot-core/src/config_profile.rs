@@ -275,6 +275,59 @@ fn add_origin(approved: &mut Vec<String>, url: &str) {
     }
 }
 
+fn remove_other_nested_keys(settings: &mut Settings, parent: &str, keys: &[&str]) {
+    let remove_parent = match settings.other.get_mut(parent) {
+        Some(serde_json::Value::Object(map)) => {
+            for key in keys {
+                map.remove(*key);
+            }
+            map.is_empty()
+        }
+        _ => false,
+    };
+    if remove_parent {
+        settings.other.remove(parent);
+    }
+}
+
+fn clear_legacy_other_overrides(settings: &mut Settings) {
+    for key in [
+        "postCorrection",
+        "post_correction",
+        "saveAuditLog",
+        "save_audit_log",
+        "disableLocalLlamaServer",
+        "disable_local_llama_server",
+        "thinkApiKey",
+        "think_api_key",
+        "multiStt",
+        "multi_stt",
+    ] {
+        settings.other.remove(key);
+    }
+    remove_other_nested_keys(
+        settings,
+        "transcription",
+        &[
+            "mode",
+            "postCorrection",
+            "post_correction",
+            "saveAuditLog",
+            "save_audit_log",
+        ],
+    );
+    remove_other_nested_keys(
+        settings,
+        "think",
+        &[
+            "apiKey",
+            "api_key",
+            "disableLocalLlamaServer",
+            "disable_local_llama_server",
+        ],
+    );
+}
+
 impl ConfigProfile {
     pub fn validate(&self) -> Result<()> {
         if self.schema_version != CURRENT_SCHEMA_VERSION {
@@ -372,14 +425,29 @@ impl ConfigProfile {
             let raw = std::fs::read_to_string(&template_path).with_context(|| {
                 format!("could not read config template {}", template_path.display())
             })?;
-            let profile: Self = toml::from_str(&raw).with_context(|| {
+            let mut profile: Self = toml::from_str(&raw).with_context(|| {
                 format!(
                     "could not parse config template {}",
                     template_path.display()
                 )
             })?;
+            let mut stripped_mask = false;
+            if is_masked_api_key(&profile.transcription.post_correction.api_key) {
+                profile.transcription.post_correction.api_key.clear();
+                stripped_mask = true;
+            }
+            if is_masked_api_key(&profile.think.api_key) {
+                profile.think.api_key.clear();
+                stripped_mask = true;
+            }
             profile.validate()?;
-            write_atomic(&user_path, raw.as_bytes()).with_context(|| {
+            let to_write = if stripped_mask {
+                toml::to_string_pretty(&profile)
+                    .context("failed to serialize sanitized config template")?
+            } else {
+                raw
+            };
+            write_atomic(&user_path, to_write.as_bytes()).with_context(|| {
                 format!("could not seed config file to {}", user_path.display())
             })?;
             return Ok(Some(LoadedConfig {
@@ -408,6 +476,7 @@ impl ConfigProfile {
     }
 
     pub fn apply_to_settings(&self, settings: &mut Settings) {
+        clear_legacy_other_overrides(settings);
         register_redacted_secrets([
             self.transcription.post_correction.api_key.as_str(),
             self.think.api_key.as_str(),
@@ -867,5 +936,118 @@ disable_local_llama_server = true
         assert!(settings.onboarding_completed);
         assert_eq!(settings.think_api_key, "iso-think-key");
         assert_eq!(settings.post_correction_api_key, "iso-pc-key");
+    }
+
+    #[test]
+    fn resolve_and_load_seeding_strips_masked_api_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("library");
+        let exe_dir = tmp.path().join("app");
+        std::fs::create_dir_all(&exe_dir).unwrap();
+        let paths = LibraryPaths::new(&root);
+
+        let template_path = exe_dir.join(CONFIG_FILE_NAME);
+        std::fs::write(&template_path, sample_toml(API_KEY_MASK, API_KEY_MASK)).unwrap();
+
+        let seeded = ConfigProfile::resolve_and_load(None, None, &paths, Some(&exe_dir))
+            .unwrap()
+            .unwrap();
+        assert!(seeded.profile.think.api_key.is_empty());
+        assert!(
+            seeded
+                .profile
+                .transcription
+                .post_correction
+                .api_key
+                .is_empty()
+        );
+        let written = std::fs::read_to_string(paths.config_file()).unwrap();
+        assert!(!written.contains(API_KEY_MASK));
+        let reloaded = ConfigProfile::load_from_path(&paths.config_file()).unwrap();
+        assert!(reloaded.think.api_key.is_empty());
+        assert!(reloaded.transcription.post_correction.api_key.is_empty());
+    }
+
+    #[test]
+    fn apply_to_settings_clears_stale_other_overrides() {
+        let profile =
+            ConfigProfile::import_toml(&sample_toml("fresh-pc-key", "fresh-think-key"), None)
+                .unwrap();
+        let mut settings = Settings::default();
+        settings.other.insert(
+            "postCorrection".into(),
+            serde_json::json!({ "enabled": false, "baseUrl": "http://127.0.0.1:9/stale" }),
+        );
+        settings.other.insert(
+            "post_correction".into(),
+            serde_json::json!({ "enabled": false }),
+        );
+        settings
+            .other
+            .insert("saveAuditLog".into(), serde_json::json!(false));
+        settings
+            .other
+            .insert("save_audit_log".into(), serde_json::json!(false));
+        settings
+            .other
+            .insert("disableLocalLlamaServer".into(), serde_json::json!(false));
+        settings.other.insert(
+            "disable_local_llama_server".into(),
+            serde_json::json!(false),
+        );
+        settings
+            .other
+            .insert("thinkApiKey".into(), serde_json::json!("stale-key"));
+        settings
+            .other
+            .insert("think_api_key".into(), serde_json::json!("stale-key-2"));
+        settings
+            .other
+            .insert("multiStt".into(), serde_json::json!({ "enabled": false }));
+        settings.other.insert(
+            "transcription".into(),
+            serde_json::json!({
+                "mode": "single",
+                "saveAuditLog": false,
+                "postCorrection": { "enabled": false },
+                "unrelatedNote": "keep"
+            }),
+        );
+        settings.other.insert(
+            "think".into(),
+            serde_json::json!({
+                "api_key": "stale-nested",
+                "disable_local_llama_server": false
+            }),
+        );
+        settings
+            .other
+            .insert("customFlag".into(), serde_json::json!(true));
+
+        profile.apply_to_settings(&mut settings);
+
+        assert!(!settings.other.contains_key("postCorrection"));
+        assert!(!settings.other.contains_key("post_correction"));
+        assert!(!settings.other.contains_key("saveAuditLog"));
+        assert!(!settings.other.contains_key("save_audit_log"));
+        assert!(!settings.other.contains_key("disableLocalLlamaServer"));
+        assert!(!settings.other.contains_key("disable_local_llama_server"));
+        assert!(!settings.other.contains_key("thinkApiKey"));
+        assert!(!settings.other.contains_key("think_api_key"));
+        assert!(!settings.other.contains_key("multiStt"));
+        assert!(!settings.other.contains_key("think"));
+        assert_eq!(
+            settings.other.get("customFlag"),
+            Some(&serde_json::json!(true))
+        );
+        let tx = settings
+            .other
+            .get("transcription")
+            .and_then(serde_json::Value::as_object)
+            .unwrap();
+        assert!(!tx.contains_key("mode"));
+        assert!(!tx.contains_key("saveAuditLog"));
+        assert!(!tx.contains_key("postCorrection"));
+        assert_eq!(tx.get("unrelatedNote"), Some(&serde_json::json!("keep")));
     }
 }

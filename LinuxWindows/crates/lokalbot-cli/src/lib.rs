@@ -1019,4 +1019,63 @@ mod tests {
         assert!(!err.message().contains("gw_cli_err_secret_4242"));
         assert!(err.message().contains("[REDACTED_KEY]"));
     }
+
+    #[test]
+    fn search_command_redacts_registered_secrets_in_json_and_table() {
+        lokalbot_core::text::register_redacted_secrets(["gw_probe_custom_secret_XYZ987"]);
+        let dir = tempfile::tempdir().unwrap();
+        let paths = LibraryPaths::new(dir.path().join("library"));
+        let library = lokalbot_core::Library::open(paths.clone()).unwrap();
+        lokalbot_core::access::set_meetings_access(&paths, true).unwrap();
+
+        let mut meeting = library
+            .create_meeting(
+                "Quarterly sync gw_probe_custom_secret_XYZ987",
+                "Zoom",
+                chrono::Utc::now(),
+            )
+            .unwrap();
+        meeting.ended_at = Some(meeting.started_at + chrono::Duration::minutes(1));
+        library.save_meeting(&meeting).unwrap();
+
+        let transcript = lokalbot_core::Transcript {
+            segments: vec![lokalbot_core::Segment {
+                start: 0.0,
+                end: 2.0,
+                speaker: "me".into(),
+                text: "Discussed needle token gw_probe_custom_secret_XYZ987 today".into(),
+                confidence: None,
+                timing_precision: None,
+                attribution: None,
+            }],
+            ..Default::default()
+        };
+        library.save_transcript(&meeting, &transcript).unwrap();
+
+        let root = paths.root().to_str().unwrap();
+        let json_out = run(Cli::try_parse_from([
+            "lokalbot-cli",
+            "--lokalbot-storage-root",
+            root,
+            "search",
+            "needle",
+        ])
+        .unwrap())
+        .unwrap();
+        assert!(!json_out.contains("gw_probe_custom_secret_XYZ987"));
+        assert!(json_out.contains("[REDACTED_KEY]"));
+
+        let table_out = run(Cli::try_parse_from([
+            "lokalbot-cli",
+            "--lokalbot-storage-root",
+            root,
+            "search",
+            "needle",
+            "--table",
+        ])
+        .unwrap())
+        .unwrap();
+        assert!(!table_out.contains("gw_probe_custom_secret_XYZ987"));
+        assert!(table_out.contains("[REDACTED_KEY]"));
+    }
 }

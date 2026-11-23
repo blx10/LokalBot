@@ -192,7 +192,7 @@ impl Pipeline {
         models
             .missing(&models.meeting_requirements(false))
             .is_empty()
-            && !models.transcription_server_blocked()
+            && !(models.multi_stt_config().is_none() && models.transcription_server_blocked())
     }
 
     pub fn defer_until_next_launch(&self, meeting_id: Uuid, summarize: bool) -> Result<()> {
@@ -345,7 +345,8 @@ impl Inner {
                 self.models
                     .missing(&self.models.meeting_requirements(false))
                     .is_empty()
-                    && !self.models.transcription_server_blocked()
+                    && !(self.models.multi_stt_config().is_none()
+                        && self.models.transcription_server_blocked())
             }
             Need::Think => self
                 .models
@@ -1949,5 +1950,54 @@ mod tests {
             .meeting_dir(&meeting)
             .join(crate::post_correction::AUDIT_FILE_NAME);
         assert!(audit_path.is_file());
+    }
+
+    #[test]
+    fn transcription_ready_ignores_blocked_remote_model_in_multi_stt_mode() {
+        let (_dir, library) = library();
+        for id in [
+            lokalbot_speech::models::WHISPER_TURBO_MODEL,
+            lokalbot_speech::models::WHISPER_TURBO_TR_KHAN_MODEL,
+            lokalbot_speech::models::ZIPFORMER_OAYK_MODEL,
+            lokalbot_speech::models::VAD_MODEL,
+        ] {
+            let model = lokalbot_speech::models::find(id).unwrap();
+            let dir = library.paths().models_dir().join("speech").join(model.id);
+            for file in model.files {
+                let path = lokalbot_speech::models::model_file(library.paths(), model, file);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, b"not a model").unwrap();
+            }
+            lokalbot_speech::models::write_bundled_marker(&dir, model).unwrap();
+        }
+
+        let multi_settings = lokalbot_core::Settings {
+            transcription_mode:
+                lokalbot_core::config_profile::TranscriptionMode::AsymmetricMultiStt,
+            transcription_model: lokalbot_core::remote_transcription::MODEL_ID.into(),
+            multi_speaker_diarization: false,
+            ..Default::default()
+        };
+        let multi_shared = Shared::for_tests(library.clone(), multi_settings, |_| {});
+        let multi_models = crate::models::Models::new(multi_shared.clone());
+        assert!(multi_models.transcription_server_blocked());
+        let multi_pipeline = Pipeline::start(multi_shared, multi_models);
+        assert!(multi_pipeline.transcription_ready());
+        assert!(multi_pipeline.inner.ready(Need::Transcription));
+        multi_pipeline.stop();
+
+        let single_settings = lokalbot_core::Settings {
+            transcription_mode: lokalbot_core::config_profile::TranscriptionMode::Single,
+            transcription_model: lokalbot_core::remote_transcription::MODEL_ID.into(),
+            multi_speaker_diarization: false,
+            ..Default::default()
+        };
+        let single_shared = Shared::for_tests(library, single_settings, |_| {});
+        let single_models = crate::models::Models::new(single_shared.clone());
+        assert!(single_models.transcription_server_blocked());
+        let single_pipeline = Pipeline::start(single_shared, single_models);
+        assert!(!single_pipeline.transcription_ready());
+        assert!(!single_pipeline.inner.ready(Need::Transcription));
+        single_pipeline.stop();
     }
 }
