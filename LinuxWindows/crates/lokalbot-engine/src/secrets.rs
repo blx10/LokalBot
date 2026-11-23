@@ -39,6 +39,46 @@ pub(crate) fn resolve_openai_api_key_with(
     lokalbot_ai::think::resolve_api_key(config_key.as_deref(), keyring_lookup())
 }
 
+const POST_CORRECTION: &str = "post-correction-api-key";
+
+pub fn save_post_correction_api_key(key: &str) -> Result<()> {
+    let entry = entry(POST_CORRECTION)?;
+    if key.trim().is_empty() {
+        match entry.delete_credential() {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(err) => Err(err).context("removing the API key"),
+        }
+    } else {
+        entry.set_password(key.trim()).context("saving the API key")
+    }
+}
+
+pub fn post_correction_api_key() -> Option<String> {
+    entry(POST_CORRECTION)
+        .ok()?
+        .get_password()
+        .ok()
+        .filter(|k| !k.trim().is_empty())
+}
+
+pub fn resolve_post_correction_api_key(settings: &lokalbot_core::Settings) -> Option<String> {
+    resolve_post_correction_api_key_with(settings, post_correction_api_key, openai_api_key)
+}
+
+pub(crate) fn resolve_post_correction_api_key_with(
+    settings: &lokalbot_core::Settings,
+    pc_keyring_lookup: impl FnOnce() -> Option<String>,
+    think_keyring_lookup: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    let config_key = crate::post_correction::post_correction_config(settings)
+        .map(|cfg| cfg.api_key)
+        .filter(|k| !k.trim().is_empty());
+    lokalbot_ai::think::resolve_api_key(
+        config_key.as_deref(),
+        pc_keyring_lookup().or_else(think_keyring_lookup),
+    )
+}
+
 const REMOTE_TRANSCRIPTION: &str = "remote-transcription-api-key";
 
 pub fn save_remote_transcription_api_key(key: &str) -> Result<()> {
@@ -310,6 +350,47 @@ mod tests {
         assert_eq!(
             read_calendar_links(&Chunked::new(items)).unwrap(),
             ["https://a.example/x.ics", "https://b.example/y.ics"]
+        );
+    }
+
+    #[test]
+    fn post_correction_api_key_precedence_prefers_config_then_pc_keyring_then_think_keyring() {
+        let mut settings = lokalbot_core::Settings {
+            post_correction_api_key: "sk-config".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_post_correction_api_key_with(
+                &settings,
+                || Some("sk-pc-keyring".into()),
+                || Some("sk-think-keyring".into()),
+            )
+            .as_deref(),
+            Some("sk-config")
+        );
+
+        settings.post_correction_api_key.clear();
+        assert_eq!(
+            resolve_post_correction_api_key_with(
+                &settings,
+                || Some("sk-pc-keyring".into()),
+                || Some("sk-think-keyring".into()),
+            )
+            .as_deref(),
+            Some("sk-pc-keyring")
+        );
+        assert_eq!(
+            resolve_post_correction_api_key_with(
+                &settings,
+                || None,
+                || Some("sk-think-keyring".into()),
+            )
+            .as_deref(),
+            Some("sk-think-keyring")
+        );
+        assert_eq!(
+            resolve_post_correction_api_key_with(&settings, || None, || None),
+            None
         );
     }
 }

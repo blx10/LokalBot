@@ -412,8 +412,9 @@ pub struct ModelsState {
     think_config_key: Entity<InputState>,
     think_config_key_dirty: bool,
     post_correction_url: Entity<InputState>,
-    post_correction_key: Entity<InputState>,
-    post_correction_key_dirty: bool,
+    pub(super) post_correction_key: Entity<InputState>,
+    pub(super) post_correction_key_dirty: bool,
+    pub(super) post_correction_key_saved: Option<bool>,
     post_correction_judge: Entity<InputState>,
     post_correction_critics: Entity<InputState>,
     post_correction_saved: Option<SharedString>,
@@ -489,6 +490,7 @@ impl ModelsState {
                     ))
             }),
             post_correction_key_dirty: false,
+            post_correction_key_saved: None,
             post_correction_judge: field(
                 "Qwen3.8-27B",
                 &settings.post_correction_primary_judge_model,
@@ -608,13 +610,14 @@ impl ModelsState {
                     }
                 }
                 InputEvent::Blur => {
-                    let stored = !page
-                        .data
-                        .read(cx)
-                        .settings
-                        .post_correction_api_key
-                        .trim()
-                        .is_empty();
+                    let stored = page.models.post_correction_key_saved.unwrap_or(false)
+                        || !page
+                            .data
+                            .read(cx)
+                            .settings
+                            .post_correction_api_key
+                            .trim()
+                            .is_empty();
                     if !page.models.post_correction_key_dirty
                         && stored
                         && input.read(cx).value().trim().is_empty()
@@ -627,6 +630,26 @@ impl ModelsState {
                 _ => {}
             },
         ));
+        cx.spawn_in(window, async move |page, cx| {
+            let saved = cx
+                .background_spawn(async {
+                    lokalbot_engine::secrets::post_correction_api_key().is_some()
+                })
+                .await;
+            let _ = page.update_in(cx, |page, window, cx| {
+                page.models.post_correction_key_saved = Some(saved);
+                if saved
+                    && !page.models.post_correction_key_dirty
+                    && page.models.post_correction_key.read(cx).value().trim().is_empty()
+                {
+                    page.models.post_correction_key.update(cx, |field, cx| {
+                        field.set_value(lokalbot_core::text::API_KEY_MASK, window, cx);
+                    });
+                }
+                cx.notify();
+            });
+        })
+        .detach();
         subscriptions.extend(state.options.subscribe(window, cx));
         subscriptions.extend(state.browse.subscribe(window, cx));
         subscriptions
@@ -1871,8 +1894,17 @@ impl SettingsPage {
         };
         let clear_pc_page = cx.entity();
         let clear_pc_key_input = self.models.post_correction_key.clone();
-        let has_pc_key = !settings.post_correction_api_key.trim().is_empty()
+        let pc_key_in_keyring = self.models.post_correction_key_saved.unwrap_or(false);
+        let has_pc_key = pc_key_in_keyring
+            || !settings.post_correction_api_key.trim().is_empty()
             || self.models.post_correction_key_dirty;
+        let pc_key_help = if pc_key_in_keyring {
+            lokalbot_i18n::tr("Saved in the system credential store.")
+        } else {
+            lokalbot_i18n::tr(
+                "Kept in the system credential store. Leave empty to fall back to your Think key.",
+            )
+        };
         let field = |label: &'static str, input: &Entity<InputState>, _cx: &App| {
             v_flex()
                 .gap(px(5.))
@@ -2051,7 +2083,7 @@ impl SettingsPage {
                         div()
                             .text_size(ty::BODY)
                             .text_color(lb.text)
-                            .child(lokalbot_i18n::tr("Config API key")),
+                            .child(lokalbot_i18n::tr("API key")),
                     )
                     .child(
                         h_flex()
@@ -2066,6 +2098,7 @@ impl SettingsPage {
                                         .on_click(move |_, window, cx| {
                                             clear_pc_page.update(cx, |page, cx| {
                                                 page.models.post_correction_key_dirty = false;
+                                                page.models.post_correction_key_saved = Some(false);
                                                 page.models.post_correction_saved = None;
                                                 page.data.update(cx, |data, cx| {
                                                     data.update_config_and_settings(
@@ -2087,10 +2120,33 @@ impl SettingsPage {
                                             clear_pc_key_input.update(cx, |field, cx| {
                                                 field.set_value("", window, cx)
                                             });
+                                            let err_page = clear_pc_page.clone();
+                                            cx.spawn(async move |cx| {
+                                                let result = cx
+                                                    .background_spawn(async {
+                                                        lokalbot_engine::secrets::save_post_correction_api_key("")
+                                                    })
+                                                    .await;
+                                                if let Err(err) = result {
+                                                    err_page.update(cx, |page, cx| {
+                                                        page.data.update(cx, |data, cx| {
+                                                            data.show_error(
+                                                                lokalbot_i18n::format(
+                                                                    "The API key was not removed: {err}",
+                                                                    &[("err", format!("{err:#}"))],
+                                                                ),
+                                                                cx,
+                                                            );
+                                                        });
+                                                    });
+                                                }
+                                            })
+                                            .detach();
                                         }),
                                 )
                             }),
-                    ),
+                    )
+                    .child(settings_row::help(pc_key_help, cx)),
             )
             .child(
                 v_flex()
@@ -2202,8 +2258,9 @@ impl SettingsPage {
                             .primary()
                             .small()
                             .label(lokalbot_i18n::tr("Save post-correction"))
-                            .on_click(move |_, _, cx| {
-                                save_page.update(cx, |page, cx| page.save_post_correction(cx))
+                            .on_click(move |_, window, cx| {
+                                save_page
+                                    .update(cx, |page, cx| page.save_post_correction(window, cx))
                             }),
                     )
                     .when_some(self.models.post_correction_saved.clone(), |this, saved| {
@@ -2219,7 +2276,7 @@ impl SettingsPage {
         form
     }
 
-    fn save_post_correction(&mut self, cx: &mut Context<Self>) {
+    fn save_post_correction(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let url = self
             .models
             .post_correction_url
@@ -2247,16 +2304,14 @@ impl SettingsPage {
             .collect();
         let dirty = self.models.post_correction_key_dirty;
         self.models.post_correction_key_dirty = false;
+        let trimmed_key = raw_key.trim().to_string();
+        let key_update =
+            (dirty && !lokalbot_core::text::is_masked_api_key(&trimmed_key)).then_some(trimmed_key);
         self.data.update(cx, |data, cx| {
             data.update_config_and_settings(
                 move |profile, settings| {
-                    let resolved = resolve_masked_api_key_edit(
-                        &profile.transcription.post_correction.api_key,
-                        &raw_key,
-                        dirty,
-                    );
-                    profile.transcription.post_correction.api_key = resolved.clone();
-                    settings.post_correction_api_key = resolved;
+                    profile.transcription.post_correction.api_key.clear();
+                    settings.post_correction_api_key.clear();
                     settings.post_correction_base_url = url;
                     if !judge.is_empty() {
                         settings.post_correction_primary_judge_model = judge;
@@ -2267,8 +2322,44 @@ impl SettingsPage {
                 cx,
             );
         });
-        self.models.post_correction_saved = Some(lokalbot_i18n::tr("Saved").into());
-        cx.notify();
+        if let Some(new_key) = key_update {
+            let has_key = !new_key.is_empty();
+            cx.spawn_in(window, async move |page, cx| {
+                let key_for_bg = new_key.clone();
+                let result = cx
+                    .background_spawn(async move {
+                        lokalbot_engine::secrets::save_post_correction_api_key(&key_for_bg)
+                    })
+                    .await;
+                let _ = page.update_in(cx, |page, window, cx| match result {
+                    Ok(()) => {
+                        page.models.post_correction_key_saved = Some(has_key);
+                        if has_key {
+                            page.models.post_correction_key.update(cx, |field, cx| {
+                                field.set_value(lokalbot_core::text::API_KEY_MASK, window, cx);
+                            });
+                        }
+                        page.models.post_correction_saved = Some(lokalbot_i18n::tr("Saved").into());
+                        cx.notify();
+                    }
+                    Err(err) => {
+                        page.data.update(cx, |data, cx| {
+                            data.show_error(
+                                lokalbot_i18n::format(
+                                    "The API key was not saved: {err}",
+                                    &[("err", format!("{err:#}"))],
+                                ),
+                                cx,
+                            );
+                        });
+                    }
+                });
+            })
+            .detach();
+        } else {
+            self.models.post_correction_saved = Some(lokalbot_i18n::tr("Saved").into());
+            cx.notify();
+        }
     }
 }
 

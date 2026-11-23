@@ -391,7 +391,7 @@ pub fn correct_transcript_with_runtime(
         runtime,
         transcript,
         segments,
-        crate::secrets::openai_api_key(),
+        crate::secrets::post_correction_api_key().or_else(crate::secrets::openai_api_key),
         on_start,
     )
 }

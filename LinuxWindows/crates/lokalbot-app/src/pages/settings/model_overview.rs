@@ -370,6 +370,35 @@ pub fn online_summary(settings: &Settings) -> String {
     }
 }
 
+fn prepare_profile_for_export(
+    mut profile: lokalbot_core::ConfigProfile,
+    has_pc_keyring_key: bool,
+) -> lokalbot_core::ConfigProfile {
+    if profile
+        .transcription
+        .post_correction
+        .api_key
+        .trim()
+        .is_empty()
+        && has_pc_keyring_key
+    {
+        profile.transcription.post_correction.api_key = lokalbot_core::text::API_KEY_MASK.into();
+    }
+    profile
+}
+
+fn extract_imported_post_correction_key(
+    profile: &mut lokalbot_core::ConfigProfile,
+) -> Option<String> {
+    let key = profile.transcription.post_correction.api_key.trim().to_string();
+    if !key.is_empty() && !lokalbot_core::text::is_masked_api_key(&key) {
+        profile.transcription.post_correction.api_key.clear();
+        Some(key)
+    } else {
+        None
+    }
+}
+
 impl SettingsPage {
     pub(super) fn models_overview(
         &mut self,
@@ -907,6 +936,7 @@ impl SettingsPage {
             .unwrap_or_else(|| data.library.paths().config_file());
         let path_display = active_path.display().to_string();
         let import_data = self.data.clone();
+        let import_page = cx.entity();
         let export_data = self.data.clone();
         let export_dir = active_path
             .parent()
@@ -943,7 +973,7 @@ impl SettingsPage {
                                     .outline()
                                     .small()
                                     .label(lokalbot_i18n::tr("Import…"))
-                                    .on_click(move |_, _, cx| {
+                                    .on_click(move |_, window, cx| {
                                         let receiver = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
                                             files: true,
                                             directories: false,
@@ -957,6 +987,8 @@ impl SettingsPage {
                                         });
                                         let existing = import_data.read(cx).config_profile.clone();
                                         let data = import_data.clone();
+                                        let page = import_page.clone();
+                                        let window_handle = window.window_handle();
                                         cx.spawn(async move |cx| {
                                             let picked = receiver.await;
                                             let path = match picked {
@@ -981,36 +1013,82 @@ impl SettingsPage {
                                             let parsed = cx
                                                 .background_spawn(async move {
                                                     let raw = std::fs::read_to_string(&path)?;
-                                                    lokalbot_core::ConfigProfile::import_toml(
-                                                        &raw,
-                                                        existing.as_ref(),
-                                                    )
+                                                    let mut imported =
+                                                        lokalbot_core::ConfigProfile::import_toml(
+                                                            &raw,
+                                                            existing.as_ref(),
+                                                        )?;
+                                                    let imported_pc_key =
+                                                        extract_imported_post_correction_key(
+                                                            &mut imported,
+                                                        );
+                                                    let saved_pc_key = if let Some(key) =
+                                                        imported_pc_key
+                                                    {
+                                                        lokalbot_engine::secrets::save_post_correction_api_key(&key)?;
+                                                        true
+                                                    } else {
+                                                        false
+                                                    };
+                                                    Ok::<_, anyhow::Error>((
+                                                        imported,
+                                                        saved_pc_key,
+                                                    ))
                                                 })
                                                 .await;
-                                            data.update(cx, |data, cx| match parsed {
-                                                Ok(imported) => {
-                                                    data.update_config_and_settings(
-                                                        move |profile, _| *profile = imported,
-                                                        cx,
-                                                    );
-                                                    data.show_message(
-                                                        lokalbot_i18n::tr("Config imported."),
-                                                        cx,
-                                                    );
+                                            match parsed {
+                                                Ok((imported, saved_pc_key)) => {
+                                                    data.update(cx, |data, cx| {
+                                                        data.update_config_and_settings(
+                                                            move |profile, _| *profile = imported,
+                                                            cx,
+                                                        );
+                                                        data.show_message(
+                                                            lokalbot_i18n::tr("Config imported."),
+                                                            cx,
+                                                        );
+                                                    });
+                                                    if saved_pc_key {
+                                                        let _ = window_handle.update(
+                                                            cx,
+                                                            |_, window, cx| {
+                                                                page.update(cx, |page, cx| {
+                                                                    page.models
+                                                                        .post_correction_key_dirty =
+                                                                        false;
+                                                                    page.models
+                                                                        .post_correction_key_saved =
+                                                                        Some(true);
+                                                                    page.models
+                                                                        .post_correction_key
+                                                                        .update(cx, |field, cx| {
+                                                                            field.set_value(
+                                                                                lokalbot_core::text::API_KEY_MASK,
+                                                                                window,
+                                                                                cx,
+                                                                            );
+                                                                        });
+                                                                    cx.notify();
+                                                                });
+                                                            },
+                                                        );
+                                                    }
                                                 }
                                                 Err(err) => {
                                                     let msg = lokalbot_core::text::redact(
                                                         &format!("{err:#}"),
                                                     );
-                                                    data.show_error(
-                                                        lokalbot_i18n::format(
-                                                            "Could not import config: {err}",
-                                                            &[("err", msg)],
-                                                        ),
-                                                        cx,
-                                                    );
+                                                    data.update(cx, |data, cx| {
+                                                        data.show_error(
+                                                            lokalbot_i18n::format(
+                                                                "Could not import config: {err}",
+                                                                &[("err", msg)],
+                                                            ),
+                                                            cx,
+                                                        );
+                                                    });
                                                 }
-                                            });
+                                            }
                                         })
                                         .detach();
                                     }),
@@ -1055,7 +1133,14 @@ impl SettingsPage {
                                             };
                                             let result = cx
                                                 .background_spawn(async move {
-                                                    let exported = profile.export_toml(true)?;
+                                                    let has_pc_keyring_key =
+                                                        lokalbot_engine::secrets::post_correction_api_key()
+                                                            .is_some();
+                                                    let prepared = prepare_profile_for_export(
+                                                        profile,
+                                                        has_pc_keyring_key,
+                                                    );
+                                                    let exported = prepared.export_toml(true)?;
                                                     std::fs::write(&path, exported.as_bytes())?;
                                                     Ok::<(), anyhow::Error>(())
                                                 })
@@ -2370,5 +2455,33 @@ mod tests {
             online_summary(&settings),
             "ai.example.com, audio.example.org"
         );
+    }
+
+    #[test]
+    fn export_masks_credential_store_post_correction_key_and_import_extracts_it() {
+        let profile = lokalbot_core::ConfigProfile::default();
+        let prepared = prepare_profile_for_export(profile.clone(), true);
+        let toml_text = prepared.export_toml(true).unwrap();
+        assert!(toml_text.contains(lokalbot_core::text::API_KEY_MASK));
+
+        let unprepared = prepare_profile_for_export(profile, false);
+        assert!(unprepared
+            .transcription
+            .post_correction
+            .api_key
+            .is_empty());
+
+        let mut imported = lokalbot_core::ConfigProfile::default();
+        imported.transcription.post_correction.api_key = "sk-imported-pc".into();
+        assert_eq!(
+            extract_imported_post_correction_key(&mut imported).as_deref(),
+            Some("sk-imported-pc")
+        );
+        assert!(imported.transcription.post_correction.api_key.is_empty());
+
+        let mut masked_import = lokalbot_core::ConfigProfile::default();
+        masked_import.transcription.post_correction.api_key =
+            lokalbot_core::text::API_KEY_MASK.into();
+        assert_eq!(extract_imported_post_correction_key(&mut masked_import), None);
     }
 }

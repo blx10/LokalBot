@@ -93,21 +93,24 @@ pub(crate) fn identity(role: ModelRole, settings: &Settings, api_key: &str) -> V
 
 fn post_correction_identity(settings: &Settings) -> Vec<String> {
     let pc = crate::post_correction::post_correction_config(settings);
-    let (base_url, judge, api_key) = match pc {
-        Some(cfg) => (cfg.base_url, cfg.primary_judge_model, cfg.api_key),
+    let (base_url, judge) = match pc {
+        Some(cfg) => (cfg.base_url, cfg.primary_judge_model),
         None => (
             settings.post_correction_base_url.clone(),
             settings.post_correction_primary_judge_model.clone(),
-            settings.post_correction_api_key.clone(),
         ),
     };
+    let resolved_key = crate::secrets::resolve_post_correction_api_key(settings).unwrap_or_default();
     vec![
         base_url,
         judge,
         format!("{:?}", settings.open_router_data_policy),
-        remote_block_reason(&settings.post_correction_base_url, &settings.approved_remote_inference_origins)
-            .unwrap_or_default(),
-        hex::encode(Sha256::digest(api_key.as_bytes())),
+        remote_block_reason(
+            &settings.post_correction_base_url,
+            &settings.approved_remote_inference_origins,
+        )
+        .unwrap_or_default(),
+        hex::encode(Sha256::digest(resolved_key.as_bytes())),
     ]
 }
 
@@ -404,10 +407,7 @@ impl Inner {
         if base_url.is_empty() {
             return Err(anyhow!("Post-correction server URL is empty."));
         }
-        let api_key = lokalbot_ai::think::resolve_api_key(
-            Some(&settings.post_correction_api_key),
-            crate::secrets::openai_api_key(),
-        );
+        let api_key = crate::secrets::resolve_post_correction_api_key(settings);
         let client = lokalbot_ai::ThinkClient::openai_compatible(
             base_url,
             &judge,
