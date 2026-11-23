@@ -212,8 +212,9 @@ fn load_note(
 }
 
 fn yaml_string(value: &str) -> String {
+    let redacted = lokalbot_core::text::redact(value);
     let mut escaped = String::new();
-    for c in single_line(value).chars() {
+    for c in single_line(&redacted).chars() {
         match c {
             '\\' => escaped.push_str("\\\\"),
             '"' => escaped.push_str("\\\""),
@@ -225,7 +226,8 @@ fn yaml_string(value: &str) -> String {
 }
 
 fn link(name: &str) -> Option<String> {
-    let target: String = name.chars().filter(|c| !"[]|#^".contains(*c)).collect();
+    let redacted = lokalbot_core::text::redact(name);
+    let target: String = redacted.chars().filter(|c| !"[]|#^".contains(*c)).collect();
     let target = single_line(&target);
     (!target.is_empty()).then(|| format!("[[{target}]]"))
 }
@@ -240,7 +242,8 @@ fn day_key(at: DateTime<Utc>) -> String {
 
 pub fn render(note: &Note, format: ExportFormat) -> String {
     let meeting = &note.meeting;
-    let title = single_line(&meeting.display_title());
+    let title = single_line(&lokalbot_core::text::redact(&meeting.display_title()));
+    let app_name = lokalbot_core::text::redact(&meeting.app_name);
     let short_id = meeting.short_id();
     let start = local(meeting.started_at).format("%H:%M").to_string();
     let duration = lokalbot_core::time::meeting_duration_label(meeting.duration_seconds());
@@ -255,7 +258,7 @@ pub fn render(note: &Note, format: ExportFormat) -> String {
                     "- **When:** {}, {start} · {duration}",
                     local(meeting.started_at).format("%B %-d, %Y")
                 ),
-                format!("- **App:** {}", inline(&meeting.app_name)),
+                format!("- **App:** {}", inline(&app_name)),
             ];
             if !note.people.is_empty() {
                 let names: Vec<String> = note.people.iter().map(|p| inline(p)).collect();
@@ -277,7 +280,7 @@ pub fn render(note: &Note, format: ExportFormat) -> String {
                 format!("date: {}", day_key(meeting.started_at)),
                 format!("time: {}", yaml_string(&start)),
                 format!("duration: {}", yaml_string(&duration)),
-                format!("app: {}", yaml_string(&meeting.app_name)),
+                format!("app: {}", yaml_string(&app_name)),
             ];
             if !people_links.is_empty() {
                 lines.push("people:".into());
@@ -320,10 +323,7 @@ pub fn render(note: &Note, format: ExportFormat) -> String {
             ]);
             sections.push(lines.join("\n"));
             sections.push(heading);
-            sections.push(format!(
-                "{start} · {duration} · {}",
-                inline(&meeting.app_name)
-            ));
+            sections.push(format!("{start} · {duration} · {}", inline(&app_name)));
         }
     }
 
@@ -345,7 +345,7 @@ pub fn render(note: &Note, format: ExportFormat) -> String {
             lokalbot_ai::sanitize::redact(transcript)
         ));
     }
-    sections.join("\n\n") + "\n"
+    lokalbot_core::text::redact(&(sections.join("\n\n") + "\n"))
 }
 
 pub fn action_lines(

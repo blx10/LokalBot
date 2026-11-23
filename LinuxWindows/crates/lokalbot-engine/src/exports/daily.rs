@@ -224,11 +224,11 @@ fn saved_moments_section(moments: &[SavedMoment]) -> String {
                 time(moment.captured_at),
                 moment.snapshot_id
             )];
-            let note = single_line(&moment.note);
+            let note = single_line(&lokalbot_core::text::redact(&moment.note));
             if !note.is_empty() {
                 lines.push(format!("  - Note: {}", inline(&note)));
             }
-            let excerpt = single_line(&moment.ocr_excerpt);
+            let excerpt = single_line(&lokalbot_core::text::redact(&moment.ocr_excerpt));
             if !excerpt.is_empty() {
                 lines.push(format!("  - OCR: {}", inline(&excerpt)));
             }
@@ -266,7 +266,7 @@ fn stats_section(snapshot: &Snapshot) -> String {
 }
 
 fn inline(value: &str) -> String {
-    value
+    lokalbot_core::text::redact(value)
         .replace('\\', "\\\\")
         .replace('`', "\\`")
         .replace('*', "\\*")
@@ -282,18 +282,48 @@ mod tests {
 
     #[test]
     fn daily_render_redacts_registered_secrets() {
-        lokalbot_core::text::register_redacted_secrets(["daily-secret-token-xyz"]);
+        lokalbot_core::text::register_redacted_secrets([
+            "daily-secret-token-xyz",
+            "gw_custom_secret_987654",
+        ]);
+        let now = Utc::now();
         let snapshot = Snapshot {
             day: chrono::NaiveDate::from_ymd_opt(2026, 11, 22).unwrap(),
-            digest: Some("Digest note with daily-secret-token-xyz inside.".into()),
+            digest: Some(
+                "Digest note with daily-secret-token-xyz and gw_custom_secret_987654 inside."
+                    .into(),
+            ),
             digest_is_out_of_date: false,
-            meetings: Vec::new(),
-            saved_moments: Vec::new(),
+            meetings: vec![MeetingReference {
+                id: "abcd1234".into(),
+                title: "Standup gw_custom_secret_987654".into(),
+                started_at: now,
+                duration_seconds: 120.0,
+            }],
+            saved_moments: vec![SavedMoment {
+                snapshot_id: 42,
+                captured_at: now,
+                app: "App gw_custom_secret_987654".into(),
+                window_title: "Win gw_custom_secret_987654".into(),
+                note: "Note gw_custom_secret_987654".into(),
+                ocr_excerpt: "OCR gw_custom_secret_987654".into(),
+            }],
             stats: DaySummary::default(),
-            app_usage: Vec::new(),
+            app_usage: vec![AppTime {
+                app: "Usage gw_custom_secret_987654".into(),
+                duration_seconds: 60.0,
+            }],
         };
-        let md = render(&snapshot, DailyMemoryExportFormat::Markdown);
-        assert!(!md.contains("daily-secret-token-xyz"));
-        assert!(md.contains("[REDACTED_KEY]"));
+        for format in [
+            DailyMemoryExportFormat::Markdown,
+            DailyMemoryExportFormat::Obsidian,
+            DailyMemoryExportFormat::Logseq,
+        ] {
+            let md = render(&snapshot, format);
+            assert!(!md.contains("daily-secret-token-xyz"));
+            assert!(!md.contains("987654"));
+            assert!(!md.contains("gw_custom_secret"));
+            assert!(md.contains("[REDACTED_KEY]"));
+        }
     }
 }

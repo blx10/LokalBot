@@ -549,3 +549,70 @@ fn the_daily_schedule_catches_up_then_waits_for_the_hour() {
         Some((day() - Duration::days(2), daily::Pass::Refresh))
     );
 }
+
+#[test]
+fn meeting_notes_render_redacts_underscored_secrets_across_all_fields() {
+    use lokalbot_core::{ActionItem, ActionReference, ActionStatus};
+    lokalbot_core::text::register_redacted_secrets(["gw_custom_secret_987654"]);
+    let dir = tempfile::tempdir().unwrap();
+    let library = library(dir.path());
+    let mut meeting = finished_meeting(&library, "Standup gw_custom_secret_987654", "x");
+    meeting.app_name = "Zoom gw_custom_secret_987654".into();
+    let at = meeting.started_at;
+    let action = ActionItem {
+        id: "a1".into(),
+        schema_version: 1,
+        text: "Rotate gw_custom_secret_987654".into(),
+        owner: Some("Bob gw_custom_secret_987654".into()),
+        due: Some("gw_custom_secret_987654".into()),
+        is_for_user: false,
+        importance: 1,
+        citations: Vec::new(),
+        attribution: None,
+    };
+    let action_ref = ActionReference {
+        id: "a1".into(),
+        meeting_id: meeting.id,
+        meeting_title: meeting.title.clone(),
+        meeting_started_at: at,
+        action_id: "a1".into(),
+        text: action.text.clone(),
+        original_text: action.text.clone(),
+        owner: action.owner.clone(),
+        due: action.due.clone(),
+        resolved_due_date: None,
+        is_for_user: false,
+        status: ActionStatus::Open,
+        importance: 1,
+        citations: Vec::new(),
+        action,
+        state_updated_at: at,
+        text_was_corrected: false,
+        owner_was_corrected: false,
+        due_was_corrected: false,
+        text_corrected_at: None,
+        owner_corrected_at: None,
+        due_corrected_at: None,
+        is_thread_excluded: false,
+    };
+    let note = Note {
+        meeting,
+        people: vec!["Alice gw_custom_secret_987654".into()],
+        projects: vec!["Proj gw_custom_secret_987654".into()],
+        summary: Some("Summary with gw_custom_secret_987654".into()),
+        actions: vec![action_ref],
+        transcript: Some("Transcript with gw_custom_secret_987654".into()),
+    };
+    for format in [
+        ExportFormat::Markdown,
+        ExportFormat::Obsidian,
+        ExportFormat::Logseq,
+    ] {
+        let rendered = meeting_notes::render(&note, format);
+        assert!(!rendered.contains("987654"), "{format:?}: {rendered}");
+        assert!(
+            !rendered.contains("gw_custom_secret"),
+            "{format:?}: {rendered}"
+        );
+    }
+}

@@ -146,11 +146,17 @@ pub fn resolve(settings: &Settings, api_key: Option<String>) -> Resolution {
                         .into(),
                 );
             }
+            let configured_key = settings.think_api_key.trim();
+            let resolved_key = if !configured_key.is_empty() {
+                Some(configured_key.to_string())
+            } else {
+                api_key.filter(|key| !key.trim().is_empty())
+            };
             Resolution::Ready(LlmEndpoint {
                 base_url: anthropic_chat_root(base),
                 model: model.to_string(),
                 context_tokens: DEFAULT_CONTEXT_TOKENS,
-                api_key: api_key.filter(|key| !key.trim().is_empty()),
+                api_key: resolved_key,
                 reasoning_dialect: ReasoningDialect::inferred(base),
                 api: ProviderApi::ChatCompletions,
                 plan: None,
@@ -530,5 +536,47 @@ mod tests {
         assert_eq!(context.destination, Destination::OnDevice);
         assert_eq!(context.destination.label(), "On this PC");
         assert!(!context.name.is_empty());
+    }
+
+    #[test]
+    fn openai_compatible_prefers_think_api_key_over_fallback_and_none() {
+        let configured = settings(|s| {
+            s.summarizer_backend = SummarizerBackend::OpenAICompatible;
+            s.openai_base_url = "https://gateway.example.com/v1".into();
+            s.openai_model = "gpt-edited".into();
+            s.approved_remote_inference_origins = vec!["https://gateway.example.com".into()];
+            s.think_api_key = " gw_custom_secret_987654 ".into();
+        });
+        let Resolution::Ready(from_none) = resolve(&configured, None) else {
+            panic!("expected ready endpoint");
+        };
+        assert_eq!(
+            from_none.api_key.as_deref(),
+            Some("gw_custom_secret_987654")
+        );
+
+        let Resolution::Ready(overrides_keyring) =
+            resolve(&configured, Some("sk-keyring-fallback".into()))
+        else {
+            panic!("expected ready endpoint");
+        };
+        assert_eq!(
+            overrides_keyring.api_key.as_deref(),
+            Some("gw_custom_secret_987654")
+        );
+
+        let fallback = settings(|s| {
+            s.summarizer_backend = SummarizerBackend::OpenAICompatible;
+            s.openai_base_url = "https://gateway.example.com/v1".into();
+            s.openai_model = "gpt-edited".into();
+            s.approved_remote_inference_origins = vec!["https://gateway.example.com".into()];
+            s.think_api_key = "   ".into();
+        });
+        let Resolution::Ready(from_keyring) =
+            resolve(&fallback, Some("sk-keyring-fallback".into()))
+        else {
+            panic!("expected ready endpoint");
+        };
+        assert_eq!(from_keyring.api_key.as_deref(), Some("sk-keyring-fallback"));
     }
 }

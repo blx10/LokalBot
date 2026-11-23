@@ -147,7 +147,14 @@ impl PiLauncher {
 
     fn connect(&self, request: &LaunchRequest) -> Result<Connection, LaunchError> {
         let api_key = match request.settings.summarizer_backend {
-            SummarizerBackend::OpenAICompatible => (self.api_key)(),
+            SummarizerBackend::OpenAICompatible => {
+                let configured = request.settings.think_api_key.trim();
+                if !configured.is_empty() {
+                    Some(configured.to_string())
+                } else {
+                    (self.api_key)()
+                }
+            }
             SummarizerBackend::BuiltIn
             | SummarizerBackend::Ollama
             | SummarizerBackend::ChatGptPlan
@@ -411,5 +418,50 @@ mod tests {
         assert!(!folder.join("old.json").exists());
         assert!(!folder.join("junk.json").exists());
         assert!(lokalbot_core::access::meetings_authorization(&paths, Some(&live)).is_some());
+    }
+
+    #[test]
+    fn connect_openai_compatible_prefers_think_api_key_over_callback() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut settings = Settings {
+            summarizer_backend: SummarizerBackend::OpenAICompatible,
+            openai_base_url: "https://gateway.example.com/v1".into(),
+            openai_model: "gpt-edited".into(),
+            approved_remote_inference_origins: vec!["https://gateway.example.com".into()],
+            think_api_key: "gw_config_agent_secret".into(),
+            ..Settings::default()
+        };
+        let request = LaunchRequest {
+            settings: settings.clone(),
+            workspace: dir.path().to_path_buf(),
+            session: SessionChoice::Fresh,
+            reasoning_level_file: dir.path().join("level.json"),
+            private_roots: Vec::new(),
+        };
+        let launcher_with_keyring = launcher(dir.path(), MemoryStore::default());
+        let connection = launcher_with_keyring.connect(&request).unwrap();
+        assert_eq!(
+            connection.endpoint.api_key.as_deref(),
+            Some("gw_config_agent_secret")
+        );
+
+        let mut launcher_without_keyring = launcher(dir.path(), MemoryStore::default());
+        launcher_without_keyring.api_key = Arc::new(|| None);
+        let connection_no_keyring = launcher_without_keyring.connect(&request).unwrap();
+        assert_eq!(
+            connection_no_keyring.endpoint.api_key.as_deref(),
+            Some("gw_config_agent_secret")
+        );
+
+        settings.think_api_key.clear();
+        let fallback_request = LaunchRequest {
+            settings,
+            ..request
+        };
+        let fallback_connection = launcher_with_keyring.connect(&fallback_request).unwrap();
+        assert_eq!(
+            fallback_connection.endpoint.api_key.as_deref(),
+            Some("sk-unrelated-fixture")
+        );
     }
 }

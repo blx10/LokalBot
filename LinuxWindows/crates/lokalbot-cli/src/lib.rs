@@ -413,7 +413,7 @@ pub fn run(cli: Cli) -> Result<String, CliError> {
     let paths = LibraryPaths::resolve(cli.storage_root.as_deref());
     let (settings, _) =
         lokalbot_core::config_profile::load_effective_settings(cli.config.as_deref(), &paths)
-            .map_err(|err| validation(format!("{err:#}")))?;
+            .map_err(|err| validation(lokalbot_core::text::redact(&format!("{err:#}"))))?;
     let client =
         || control::Client::new(paths.clone(), cli.storage_root.clone(), cli.config.clone());
     lokalbot_core::SpeakerAttribution::set_microphone_is_user(settings.microphone_is_user);
@@ -1002,5 +1002,21 @@ mod tests {
         ])
         .unwrap();
         assert!(run(cli).is_err());
+
+        lokalbot_core::text::register_redacted_secrets(["gw_cli_err_secret_4242"]);
+        let bad_cfg = dir.path().join("bad-gw_cli_err_secret_4242.toml");
+        std::fs::write(&bad_cfg, "schema_version = [gw_cli_err_secret_4242").unwrap();
+        let bad_cli = Cli::try_parse_from([
+            "lokalbot-cli",
+            "--config",
+            bad_cfg.to_str().unwrap(),
+            "--lokalbot-storage-root",
+            dir.path().to_str().unwrap(),
+            "brief",
+        ])
+        .unwrap();
+        let err = run(bad_cli).unwrap_err();
+        assert!(!err.message().contains("gw_cli_err_secret_4242"));
+        assert!(err.message().contains("[REDACTED_KEY]"));
     }
 }

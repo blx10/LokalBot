@@ -350,20 +350,22 @@ pub fn get_json(session: &Session, meeting: &Meeting, options: &GetOptions) -> S
     let entry = GetEntry {
         id: short_id(meeting),
         uuid: meeting.id.hyphenated().to_string(),
-        title: meeting.title.clone(),
+        title: lokalbot_core::text::redact(&meeting.title),
         date: iso8601(meeting.started_at),
         duration_seconds: duration(meeting).unwrap_or(0.0),
-        app_source: meeting.app_name.clone(),
+        app_source: lokalbot_core::text::redact(&meeting.app_name),
         has_system_track: meeting.has_system_track,
         summary: options
             .include_summary
             .then(|| session.summary(meeting))
-            .flatten(),
+            .flatten()
+            .map(|text| lokalbot_core::text::redact(&text)),
         transcript: options
             .include_transcript
             .then(|| session.transcript_markdown(meeting))
-            .flatten(),
-        folder: session.folder(meeting).to_string_lossy().into_owned(),
+            .flatten()
+            .map(|text| lokalbot_core::text::redact(&text)),
+        folder: lokalbot_core::text::redact(&session.folder(meeting).to_string_lossy()),
         sample: meeting.is_sample().then_some(true),
     };
     json::pretty(&entry, true)
@@ -612,5 +614,43 @@ mod tests {
         assert!(local_day("2026-02-28").is_some());
         assert!(local_day("2026-02-30").is_none());
         assert!(local_day("2026-2-03").is_none());
+    }
+
+    #[test]
+    fn get_json_redacts_registered_secrets_and_stays_valid_json() {
+        lokalbot_core::text::register_redacted_secrets(["gw_custom_secret_987654"]);
+        let dir = tempfile::tempdir().unwrap();
+        let paths = LibraryPaths::new(dir.path().join("library"));
+        let library = Library::open(paths.clone()).unwrap();
+        let mut meeting = library
+            .create_meeting("Sync", "Zoom gw_custom_secret_987654", Utc::now())
+            .unwrap();
+        meeting.title = "Sync gw_custom_secret_987654".into();
+        library.save_meeting(&meeting).unwrap();
+        let folder = library.meeting_dir(&meeting);
+        std::fs::write(
+            folder.join("summary.md"),
+            "Summary with gw_custom_secret_987654",
+        )
+        .unwrap();
+        std::fs::write(
+            folder.join("transcript.md"),
+            "**[00:00:01] Me:** Transcript with gw_custom_secret_987654",
+        )
+        .unwrap();
+
+        let session = Session::open(paths).unwrap();
+        let output = get_json(&session, &meeting, &GetOptions::all());
+        assert!(!output.contains("987654"));
+        assert!(!output.contains("gw_custom_secret"));
+        assert!(output.contains("[REDACTED_KEY]"));
+        let parsed: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(parsed["title"], "Sync [REDACTED_KEY]");
+        assert_eq!(parsed["app_source"], "Zoom [REDACTED_KEY]");
+        assert_eq!(parsed["summary"], "Summary with [REDACTED_KEY]");
+        assert_eq!(
+            parsed["transcript"],
+            "**[00:00:01] Me:** Transcript with [REDACTED_KEY]"
+        );
     }
 }

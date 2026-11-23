@@ -25,7 +25,8 @@ pub(crate) fn single_line(value: &str) -> String {
 }
 
 pub(crate) fn inline(value: &str) -> String {
-    single_line(value)
+    let redacted = lokalbot_core::text::redact(value);
+    single_line(&redacted)
         .replace('\\', "\\\\")
         .replace('`', "\\`")
         .replace('*', "\\*")

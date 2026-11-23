@@ -842,7 +842,8 @@ pub fn meeting_markdown(doc: &MeetingDoc) -> String {
 }
 
 pub fn transcript_text(doc: &MeetingDoc) -> String {
-    doc.rows
+    let raw = doc
+        .rows
         .iter()
         .map(|row| {
             format!(
@@ -853,7 +854,8 @@ pub fn transcript_text(doc: &MeetingDoc) -> String {
             )
         })
         .collect::<Vec<_>>()
-        .join("\n")
+        .join("\n");
+    lokalbot_core::text::redact(&raw)
 }
 
 pub(super) fn deletable(ids: Vec<uuid::Uuid>, recording: Option<uuid::Uuid>) -> Vec<uuid::Uuid> {
@@ -924,5 +926,29 @@ mod tests {
         let md = meeting_markdown(&doc);
         assert!(!md.contains("meeting-secret-token-xyz"));
         assert!(md.contains("[REDACTED_KEY]"));
+    }
+
+    #[test]
+    fn transcript_text_redacts_registered_secrets() {
+        lokalbot_core::text::register_redacted_secrets(["gw_transcript_secret_778899"]);
+        let tmp = tempfile::tempdir().unwrap();
+        let library = Library::open(lokalbot_core::LibraryPaths::new(tmp.path())).unwrap();
+        let meeting = library
+            .create_meeting("Sync", "Zoom", lokalbot_core::time::now_seconds())
+            .unwrap();
+        let mut doc = load(&library, meeting);
+        doc.rows.push(TranscriptRow {
+            start: 1.0,
+            end: 2.0,
+            speaker: "speaker_0".into(),
+            name: "Alice gw_transcript_secret_778899".into(),
+            color: 1,
+            text: "Use token gw_transcript_secret_778899 now".into(),
+            begins_turn: true,
+        });
+        let text = transcript_text(&doc);
+        assert!(!text.contains("778899"));
+        assert!(!text.contains("gw_transcript_secret"));
+        assert!(text.contains("[REDACTED_KEY]"));
     }
 }

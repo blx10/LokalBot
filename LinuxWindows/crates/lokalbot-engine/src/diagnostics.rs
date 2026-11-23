@@ -209,7 +209,7 @@ fn write_archive(
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_default();
             archive.start_file(format!("{TOP_FOLDER}/{folder}/{name}"), options)?;
-            if folder == "logs"
+            if matches!(folder, "logs" | "health" | "capture-traces")
                 && let Ok(text) = std::str::from_utf8(&bytes)
             {
                 archive.write_all(lokalbot_core::text::redact(text).as_bytes())?;
@@ -381,5 +381,60 @@ mod tests {
             1
         );
         assert!(export(&library, &Settings::default(), dir.path()).is_err());
+    }
+
+    #[test]
+    fn diagnostics_archive_redacts_registered_secrets_in_health_and_capture_traces() {
+        lokalbot_core::text::register_redacted_secrets(["gw_custom_secret_987654"]);
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("library");
+        let library = Library::open(lokalbot_core::LibraryPaths::new(&root)).unwrap();
+        std::fs::create_dir_all(library.paths().logs_dir()).unwrap();
+        std::fs::write(
+            library.paths().logs_dir().join("lokalbot.log"),
+            "log with gw_custom_secret_987654",
+        )
+        .unwrap();
+        let health = reports_dir(&root);
+        std::fs::create_dir_all(&health).unwrap();
+        std::fs::write(
+            health.join("2026-11-23.md"),
+            "# Health\nGateway gw_custom_secret_987654\n",
+        )
+        .unwrap();
+        std::fs::write(
+            health.join("2026-11-23.json"),
+            r#"{"status":"gw_custom_secret_987654"}"#,
+        )
+        .unwrap();
+        let traces = capture_traces_dir(&root);
+        std::fs::create_dir_all(&traces).unwrap();
+        std::fs::write(
+            traces.join("trace.json"),
+            r#"{"detail":"gw_custom_secret_987654"}"#,
+        )
+        .unwrap();
+
+        let destination = dir.path().join("diag.zip");
+        export(&library, &Settings::default(), &destination).unwrap();
+        let files = entries(&destination);
+        for name in [
+            "LokalBot Diagnostics/logs/lokalbot.log",
+            "LokalBot Diagnostics/health/2026-11-23.md",
+            "LokalBot Diagnostics/health/2026-11-23.json",
+            "LokalBot Diagnostics/capture-traces/trace.json",
+        ] {
+            let text = &files[name];
+            assert!(!text.contains("987654"), "{name} leaked: {text}");
+            assert!(text.contains("[REDACTED_KEY]"), "{name}: {text}");
+        }
+        assert!(
+            serde_json::from_str::<Value>(&files["LokalBot Diagnostics/health/2026-11-23.json"])
+                .is_ok()
+        );
+        assert!(
+            serde_json::from_str::<Value>(&files["LokalBot Diagnostics/capture-traces/trace.json"])
+                .is_ok()
+        );
     }
 }

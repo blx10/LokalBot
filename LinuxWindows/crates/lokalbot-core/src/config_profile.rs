@@ -264,9 +264,7 @@ fn backend_name_from_settings(backend: SummarizerBackend) -> &'static str {
 }
 
 fn add_origin(approved: &mut Vec<String>, url: &str) {
-    let Some(origin) =
-        origin_of(url).filter(|o| o.starts_with("http://") || o.starts_with("https://"))
-    else {
+    let Some(origin) = origin_of(url).filter(|o| o.starts_with("https://")) else {
         return;
     };
     if !approved
@@ -755,6 +753,12 @@ disable_local_llama_server = true
         profile.deployment.auto_approve_configured_origins = true;
         profile.think.base_url = "http://remote.example.com/v1".into();
         profile.apply_to_settings(&mut settings);
+        assert!(
+            !settings
+                .approved_remote_inference_origins
+                .iter()
+                .any(|o| o.starts_with("http://"))
+        );
         assert!(
             crate::access::remote_block_reason(
                 &settings.openai_base_url,

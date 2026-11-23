@@ -552,6 +552,12 @@ impl ModelsState {
         window: &mut Window,
         cx: &mut Context<SettingsPage>,
     ) {
+        if old.summarizer_backend != new.summarizer_backend {
+            self.connection = match new.summarizer_backend {
+                SummarizerBackend::BuiltIn => SummarizerBackend::OpenAICompatible,
+                other => other,
+            };
+        }
         for (input, before, after) in [
             (&self.openai_url, &old.openai_base_url, &new.openai_base_url),
             (&self.openai_model, &old.openai_model, &new.openai_model),
@@ -629,9 +635,9 @@ impl ModelsState {
     }
 }
 
-pub(crate) fn resolve_masked_api_key_edit(stored: &str, input_value: &str) -> String {
+pub(crate) fn resolve_masked_api_key_edit(stored: &str, input_value: &str, dirty: bool) -> String {
     let trimmed = input_value.trim();
-    if lokalbot_core::text::is_masked_api_key(trimmed) {
+    if lokalbot_core::text::is_masked_api_key(trimmed) || (!dirty && trimmed.is_empty()) {
         stored.to_string()
     } else {
         trimmed.to_string()
@@ -1092,6 +1098,10 @@ impl SettingsPage {
                 Input::new(&self.models.think_config_key)
             };
             let cfg_page = page.clone();
+            let clear_cfg_key_input = self.models.think_config_key.clone();
+            let clear_cfg_page = page.clone();
+            let has_think_cfg_key =
+                !settings.think_api_key.trim().is_empty() || self.models.think_config_key_dirty;
             let disable_data = self.data.clone();
             form = form
                 .child(field(lokalbot_i18n::tr("Server URL"), &self.models.openai_url, cx))
@@ -1104,13 +1114,20 @@ impl SettingsPage {
                             h_flex()
                                 .gap(px(8.))
                                 .child(div().flex_1().min_w_0().child(cfg_key_field))
-                                .child(Button::new("settings-save-config-key").outline().small().label(lokalbot_i18n::tr("Save to config")).on_click(move |_, _, cx| {
+                                .child(Button::new("settings-save-config-key").outline().small().label(lokalbot_i18n::tr("Save to config")).on_click(move |_, window, cx| {
                                     let raw = cfg_key_input.read(cx).value().to_string();
+                                    let mut restored_key = None;
                                     cfg_page.update(cx, |page, cx| {
+                                        let dirty = page.models.think_config_key_dirty;
                                         page.models.think_config_key_dirty = false;
                                         page.data.update(cx, |data, cx| {
                                             data.update_config_and_settings(|profile, settings| {
-                                                let resolved = resolve_masked_api_key_edit(&profile.think.api_key, &raw);
+                                                let resolved = resolve_masked_api_key_edit(
+                                                    &profile.think.api_key,
+                                                    &raw,
+                                                    dirty,
+                                                );
+                                                restored_key = Some(resolved.clone());
                                                 profile.think.api_key = resolved.clone();
                                                 settings.think_api_key = resolved;
                                             }, cx);
@@ -1118,7 +1135,40 @@ impl SettingsPage {
                                         });
                                         cx.notify();
                                     });
-                                })),
+                                    if let Some(resolved) = restored_key
+                                        && !resolved.is_empty()
+                                        && raw.trim().is_empty()
+                                    {
+                                        cfg_key_input.update(cx, |field, cx| {
+                                            field.set_value(lokalbot_core::text::API_KEY_MASK, window, cx)
+                                        });
+                                    }
+                                }))
+                                .when(has_think_cfg_key, |row| {
+                                    row.child(
+                                        Button::new("settings-clear-config-key")
+                                            .outline()
+                                            .small()
+                                            .label(lokalbot_i18n::tr("Clear"))
+                                            .on_click(move |_, window, cx| {
+                                                clear_cfg_page.update(cx, |page, cx| {
+                                                    page.models.think_config_key_dirty = false;
+                                                    page.models.saved = None;
+                                                    page.data.update(cx, |data, cx| {
+                                                        data.update_config_and_settings(|profile, settings| {
+                                                            profile.think.api_key.clear();
+                                                            settings.think_api_key.clear();
+                                                        }, cx);
+                                                        data.show_message(lokalbot_i18n::tr("Saved to lokalbot-config.toml."), cx);
+                                                    });
+                                                    cx.notify();
+                                                });
+                                                clear_cfg_key_input.update(cx, |field, cx| {
+                                                    field.set_value("", window, cx)
+                                                });
+                                            }),
+                                    )
+                                }),
                         )
                         .child(settings_row::help(lokalbot_i18n::tr("Stored in lokalbot-config.toml and masked in the UI."), cx)),
                 )
@@ -1535,6 +1585,7 @@ impl SettingsPage {
         let (url, model) = self.models.draft(cx);
         let ollama = self.models.connection == SummarizerBackend::Ollama;
         let raw_cfg_key = self.models.think_config_key.read(cx).value().to_string();
+        let dirty = self.models.think_config_key_dirty;
         self.models.think_config_key_dirty = false;
         self.data.update(cx, |data, cx| {
             data.update_config_and_settings(
@@ -1545,8 +1596,11 @@ impl SettingsPage {
                     } else {
                         s.openai_base_url = url;
                         s.openai_model = model;
-                        let resolved =
-                            resolve_masked_api_key_edit(&profile.think.api_key, &raw_cfg_key);
+                        let resolved = resolve_masked_api_key_edit(
+                            &profile.think.api_key,
+                            &raw_cfg_key,
+                            dirty,
+                        );
                         profile.think.api_key = resolved.clone();
                         s.think_api_key = resolved;
                     }
@@ -1588,6 +1642,10 @@ impl SettingsPage {
         } else {
             Input::new(&self.models.post_correction_key)
         };
+        let clear_pc_page = cx.entity();
+        let clear_pc_key_input = self.models.post_correction_key.clone();
+        let has_pc_key = !settings.post_correction_api_key.trim().is_empty()
+            || self.models.post_correction_key_dirty;
         let field = |label: &'static str, input: &Entity<InputState>, _cx: &App| {
             v_flex()
                 .gap(px(5.))
@@ -1691,7 +1749,44 @@ impl SettingsPage {
                             .text_color(lb.text)
                             .child(lokalbot_i18n::tr("Config API key")),
                     )
-                    .child(pc_key_field),
+                    .child(
+                        h_flex()
+                            .gap(px(8.))
+                            .child(div().flex_1().min_w_0().child(pc_key_field))
+                            .when(has_pc_key, |row| {
+                                row.child(
+                                    Button::new("settings-clear-post-correction-key")
+                                        .outline()
+                                        .small()
+                                        .label(lokalbot_i18n::tr("Clear"))
+                                        .on_click(move |_, window, cx| {
+                                            clear_pc_page.update(cx, |page, cx| {
+                                                page.models.post_correction_key_dirty = false;
+                                                page.models.post_correction_saved = None;
+                                                page.data.update(cx, |data, cx| {
+                                                    data.update_config_and_settings(
+                                                        |profile, settings| {
+                                                            profile
+                                                                .transcription
+                                                                .post_correction
+                                                                .api_key
+                                                                .clear();
+                                                            settings
+                                                                .post_correction_api_key
+                                                                .clear();
+                                                        },
+                                                        cx,
+                                                    );
+                                                });
+                                                cx.notify();
+                                            });
+                                            clear_pc_key_input.update(cx, |field, cx| {
+                                                field.set_value("", window, cx)
+                                            });
+                                        }),
+                                )
+                            }),
+                    ),
             )
             .child(field(
                 lokalbot_i18n::tr("Judge model"),
@@ -1822,6 +1917,7 @@ impl SettingsPage {
             .filter(|m| !m.is_empty())
             .map(str::to_string)
             .collect();
+        let dirty = self.models.post_correction_key_dirty;
         self.models.post_correction_key_dirty = false;
         self.data.update(cx, |data, cx| {
             data.update_config_and_settings(
@@ -1829,6 +1925,7 @@ impl SettingsPage {
                     let resolved = resolve_masked_api_key_edit(
                         &profile.transcription.post_correction.api_key,
                         &raw_key,
+                        dirty,
                     );
                     profile.transcription.post_correction.api_key = resolved.clone();
                     settings.post_correction_api_key = resolved;
@@ -1836,9 +1933,7 @@ impl SettingsPage {
                     if !judge.is_empty() {
                         settings.post_correction_primary_judge_model = judge;
                     }
-                    if !critics.is_empty() {
-                        settings.post_correction_support_critic_models = critics;
-                    }
+                    settings.post_correction_support_critic_models = critics;
                     profile.sync_from_settings(settings);
                 },
                 cx,
@@ -2160,17 +2255,25 @@ mod tests {
     #[test]
     fn masked_api_key_edit_preserves_or_replaces_correctly() {
         assert_eq!(
-            resolve_masked_api_key_edit("sk-real-123", lokalbot_core::text::API_KEY_MASK),
+            resolve_masked_api_key_edit("sk-real-123", lokalbot_core::text::API_KEY_MASK, false),
             "sk-real-123"
         );
         assert_eq!(
-            resolve_masked_api_key_edit("sk-real-123", "  ••••••••  "),
+            resolve_masked_api_key_edit("sk-real-123", "  ••••••••  ", true),
             "sk-real-123"
         );
         assert_eq!(
-            resolve_masked_api_key_edit("sk-real-123", "sk-new-456"),
+            resolve_masked_api_key_edit("sk-real-123", "", false),
+            "sk-real-123"
+        );
+        assert_eq!(
+            resolve_masked_api_key_edit("sk-real-123", "   ", false),
+            "sk-real-123"
+        );
+        assert_eq!(
+            resolve_masked_api_key_edit("sk-real-123", "sk-new-456", true),
             "sk-new-456"
         );
-        assert_eq!(resolve_masked_api_key_edit("sk-real-123", ""), "");
+        assert_eq!(resolve_masked_api_key_edit("sk-real-123", "", true), "");
     }
 }
