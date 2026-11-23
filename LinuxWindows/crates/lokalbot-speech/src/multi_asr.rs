@@ -614,10 +614,11 @@ mod tests {
             _cpu_threads: usize,
             auto_fallback_to_cpu: bool,
         ) -> Result<Box<dyn PassDecoder>> {
-            if self.simulate_igpu_failure && slot.device == ComputeDevice::Igpu {
-                if !auto_fallback_to_cpu {
-                    anyhow::bail!("iGPU unavailable and auto_fallback_to_cpu is false");
-                }
+            if self.simulate_igpu_failure
+                && slot.device == ComputeDevice::Igpu
+                && !auto_fallback_to_cpu
+            {
+                anyhow::bail!("iGPU unavailable and auto_fallback_to_cpu is false");
             }
             let now = self.active.fetch_add(1, Ordering::SeqCst) + 1;
             self.peak_active.fetch_max(now, Ordering::SeqCst);

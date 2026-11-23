@@ -186,13 +186,25 @@ impl WhisperRunner {
                 match post_inference(&self.agent, &url, &wav, effective_lang.as_deref()) {
                     Ok(decoded) => Ok(decoded),
                     Err(err) => {
-                        let current = self.provenance();
-                        if !*auto_fallback_to_cpu || current.actual_device != ComputeDevice::Igpu {
+                        if !*auto_fallback_to_cpu {
                             return Err(err);
+                        }
+                        let mut guard = server.lock();
+                        if self.provenance.lock().actual_device != ComputeDevice::Igpu {
+                            let proc = guard
+                                .as_ref()
+                                .ok_or_else(|| anyhow!("whisper-server process is not running"))?;
+                            let retry_url = format!("http://127.0.0.1:{}/inference", proc.port);
+                            drop(guard);
+                            return post_inference(
+                                &self.agent,
+                                &retry_url,
+                                &wav,
+                                effective_lang.as_deref(),
+                            );
                         }
                         let reason = format!("whisper-server iGPU inference failed: {err:#}");
                         log::warn!("speech: {reason}; falling back to CPU");
-                        let mut guard = server.lock();
                         *guard = None;
                         let cpu_server = spawn_and_wait(
                             &self.agent,
@@ -319,6 +331,7 @@ pub fn vulkan_available_for(binary: &Path) -> std::result::Result<(), String> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn start_with_fallback(
     agent: &ureq::Agent,
     binary: &Path,
@@ -329,15 +342,24 @@ fn start_with_fallback(
     requested_device: ComputeDevice,
     auto_fallback_to_cpu: bool,
 ) -> Result<(ServerProcess, DeviceProvenance)> {
+    start_with_fallback_using(
+        binary,
+        model_id,
+        requested_device,
+        auto_fallback_to_cpu,
+        |device| spawn_and_wait(agent, binary, model_file, language, threads, device),
+    )
+}
+
+fn start_with_fallback_using<T>(
+    binary: &Path,
+    model_id: &str,
+    requested_device: ComputeDevice,
+    auto_fallback_to_cpu: bool,
+    mut spawner: impl FnMut(ComputeDevice) -> Result<T>,
+) -> Result<(T, DeviceProvenance)> {
     if requested_device == ComputeDevice::Cpu {
-        let server = spawn_and_wait(
-            agent,
-            binary,
-            model_file,
-            language,
-            threads,
-            ComputeDevice::Cpu,
-        )?;
+        let server = spawner(ComputeDevice::Cpu)?;
         let provenance = DeviceProvenance {
             model_id: model_id.to_string(),
             requested_device,
@@ -355,14 +377,7 @@ fn start_with_fallback(
             bail!("Vulkan iGPU unavailable for {model_id}: {reason}");
         }
         log::warn!("speech: {reason}; starting {model_id} on CPU");
-        let server = spawn_and_wait(
-            agent,
-            binary,
-            model_file,
-            language,
-            threads,
-            ComputeDevice::Cpu,
-        )?;
+        let server = spawner(ComputeDevice::Cpu)?;
         let provenance = DeviceProvenance {
             model_id: model_id.to_string(),
             requested_device,
@@ -374,14 +389,7 @@ fn start_with_fallback(
         return Ok((server, provenance));
     }
 
-    match spawn_and_wait(
-        agent,
-        binary,
-        model_file,
-        language,
-        threads,
-        ComputeDevice::Igpu,
-    ) {
+    match spawner(ComputeDevice::Igpu) {
         Ok(server) => {
             let provenance = DeviceProvenance {
                 model_id: model_id.to_string(),
@@ -399,14 +407,7 @@ fn start_with_fallback(
             }
             let reason = format!("Vulkan iGPU launch failed: {err:#}");
             log::warn!("speech: {reason}; falling back to CPU for {model_id}");
-            let server = spawn_and_wait(
-                agent,
-                binary,
-                model_file,
-                language,
-                threads,
-                ComputeDevice::Cpu,
-            )?;
+            let server = spawner(ComputeDevice::Cpu)?;
             let provenance = DeviceProvenance {
                 model_id: model_id.to_string(),
                 requested_device,
@@ -868,5 +869,47 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(find_whisper_server(&paths, &cfg).unwrap(), fake_bin);
+    }
+
+    #[test]
+    fn cpu_fallback_triggers_when_ggml_vulkan_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake_bin = dir.path().join(whisper_server_filename());
+        std::fs::write(&fake_bin, b"stub").unwrap();
+        assert!(vulkan_available_for(&fake_bin).is_err());
+
+        let mut called = Vec::new();
+        let (tag, prov) = start_with_fallback_using(
+            &fake_bin,
+            "whisper-turbo",
+            ComputeDevice::Igpu,
+            true,
+            |device| {
+                called.push(device);
+                Ok(device)
+            },
+        )
+        .unwrap();
+        assert_eq!(tag, ComputeDevice::Cpu);
+        assert_eq!(called, vec![ComputeDevice::Cpu]);
+        assert_eq!(prov.requested_device, ComputeDevice::Igpu);
+        assert_eq!(prov.actual_device, ComputeDevice::Cpu);
+        assert!(prov.fallback_occurred);
+        assert_eq!(prov.backend_detail, "whisper.cpp-cpu");
+
+        let mut disabled_calls = 0usize;
+        let err = start_with_fallback_using(
+            &fake_bin,
+            "whisper-turbo",
+            ComputeDevice::Igpu,
+            false,
+            |_| -> Result<()> {
+                disabled_calls += 1;
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(disabled_calls, 0);
+        assert!(err.to_string().contains("Vulkan iGPU unavailable"));
     }
 }

@@ -167,12 +167,12 @@ enum AsrInner {
     Sherpa {
         model: &'static SpeechModel,
         family: Family,
-        base: OfflineRecognizerConfig,
+        base: Box<OfflineRecognizerConfig>,
         current: Mutex<(Option<String>, Arc<OfflineRecognizer>)>,
     },
     WhisperCpp {
         family: Family,
-        runner: WhisperRunner,
+        runner: Box<WhisperRunner>,
     },
 }
 
@@ -204,7 +204,7 @@ impl Asr {
             .family()
             .ok_or_else(|| anyhow!("{} is not a transcription model", model.display_name))?;
         if family == Family::WhisperGgml {
-            let runner = WhisperRunner::load(paths, model, language, config)?;
+            let runner = Box::new(WhisperRunner::load(paths, model, language, config)?);
             return Ok(Self {
                 inner: AsrInner::WhisperCpp { family, runner },
             });
@@ -220,7 +220,7 @@ impl Asr {
             inner: AsrInner::Sherpa {
                 model,
                 family,
-                base: sherpa_cfg,
+                base: Box::new(sherpa_cfg),
                 current: Mutex::new((None, Arc::new(recognizer))),
             },
         })
@@ -271,7 +271,7 @@ impl Asr {
         if guard.0 == fixed_language {
             return Ok(Arc::clone(&guard.1));
         }
-        let mut config = base.clone();
+        let mut config = (**base).clone();
         let wanted = fixed_language.clone().unwrap_or_default();
         match family {
             Family::SenseVoice => {

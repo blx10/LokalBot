@@ -480,12 +480,28 @@ fn candidate_dirs(
     resolver: &SpeechModelPaths,
     model: &SpeechModel,
 ) -> Vec<(PathBuf, bool)> {
+    candidate_dirs_with_env(
+        paths,
+        resolver,
+        model,
+        std::env::var_os(MODELS_DIR_ENV).as_deref(),
+    )
+}
+
+fn candidate_dirs_with_env(
+    paths: &LibraryPaths,
+    resolver: &SpeechModelPaths,
+    model: &SpeechModel,
+    env_dir: Option<&std::ffi::OsStr>,
+) -> Vec<(PathBuf, bool)> {
     let mut candidates = Vec::new();
     if let Some(explicit) = &resolver.explicit_models_dir {
         push_root_candidates(&mut candidates, explicit, model);
     }
-    if let Some(env_dir) = std::env::var_os(MODELS_DIR_ENV) {
-        push_root_candidates(&mut candidates, Path::new(&env_dir), model);
+    if let Some(env_dir) = env_dir
+        && !env_dir.is_empty()
+    {
+        push_root_candidates(&mut candidates, Path::new(env_dir), model);
     }
     candidates.push((paths.models_dir().join("speech").join(model.id), true));
     if let Some(exe_dir) = &resolver.exe_dir {
@@ -628,6 +644,32 @@ pub fn is_installed_with(
     candidate_dirs(paths, resolver, model)
         .into_iter()
         .any(|(dir, is_user_dir)| is_installed_in_dir(&dir, model, is_user_dir))
+}
+
+fn dir_has_any_artifact(dir: &Path, model: &SpeechModel) -> bool {
+    if dir.join(MARKER).exists() {
+        return true;
+    }
+    model.files.iter().any(|file| join_rel(dir, file).exists())
+}
+
+pub fn resolve_installed_dir(
+    paths: &LibraryPaths,
+    resolver: &SpeechModelPaths,
+    model: &SpeechModel,
+) -> Result<Option<PathBuf>> {
+    for (dir, is_user_dir) in candidate_dirs(paths, resolver, model) {
+        if is_installed_in_dir(&dir, model, is_user_dir) {
+            if model.bundled || !model.file_sha256s.is_empty() {
+                verify_integrity(&dir, model)?;
+            }
+            return Ok(Some(dir));
+        }
+        if (model.bundled || !model.file_sha256s.is_empty()) && dir_has_any_artifact(&dir, model) {
+            verify_integrity(&dir, model)?;
+        }
+    }
+    Ok(None)
 }
 
 fn sha256_file(path: &Path) -> Result<String> {
@@ -1000,5 +1042,22 @@ mod tests {
         assert!(is_installed(&paths, vad));
         uninstall(&paths, vad).unwrap();
         assert!(!is_installed(&paths, vad));
+    }
+
+    #[test]
+    fn empty_env_models_dir_is_ignored() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = LibraryPaths::new(root.path());
+        let model = find(ZIPFORMER_OAYK_MODEL).unwrap();
+        let dirs = candidate_dirs_with_env(
+            &paths,
+            &SpeechModelPaths::default(),
+            model,
+            Some(std::ffi::OsStr::new("")),
+        );
+        assert!(
+            dirs.iter().all(|(d, _)| !d.as_os_str().is_empty() && d.is_absolute()),
+            "empty env var produced relative candidate: {dirs:?}"
+        );
     }
 }

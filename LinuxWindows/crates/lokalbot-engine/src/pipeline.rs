@@ -711,13 +711,16 @@ pub(crate) fn transcribe_meeting_multi_stt(
     progress: &mut dyn FnMut(lokalbot_speech::MultiSttProgress),
 ) -> Result<(Transcript, lokalbot_speech::MultiSttResult)> {
     let library = &shared.library;
-    let detailed = shared
+    let mut detailed = shared
         .speech
         .run_multi_stt_with_shared(shared, config, mic, system, options, progress)
         .context("multi-stt transcription")?;
     let mut transcript = detailed.transcript.clone();
     if let Some(range) = meeting.valid_content_range() {
         range.apply(&mut transcript);
+        detailed
+            .segments
+            .retain(|s| s.start >= range.start && s.end <= range.end);
     }
     let previous = library.transcript(meeting)?;
     let memory = crate::voice::memory(library);
@@ -749,15 +752,59 @@ pub(crate) fn transcribe_meeting_multi_stt(
             transcript
         }
     };
+    let vocab_prompt = lokalbot_speech::models::accepts_vocabulary(&config.primary.id)
+        .then_some(options.vocabulary_prompt.as_deref())
+        .flatten();
     let transcript = finished_transcript(
         meeting,
         &library.meeting_dir(meeting),
         previous.as_ref(),
         transcript,
-        options.vocabulary_prompt.as_deref(),
+        vocab_prompt,
     )?;
     let transcript = memory.applying_latest_decision(&transcript, meeting.id);
+    detailed.segments = reconcile_multi_segments(&transcript, detailed.segments);
+    detailed.transcript = transcript.clone();
     Ok((transcript, detailed))
+}
+
+#[allow(dead_code)]
+fn reconcile_multi_segments(
+    transcript: &Transcript,
+    previous_segments: Vec<lokalbot_speech::MultiSttSegment>,
+) -> Vec<lokalbot_speech::MultiSttSegment> {
+    let mut pool: Vec<Option<lokalbot_speech::MultiSttSegment>> =
+        previous_segments.into_iter().map(Some).collect();
+    let mut out = Vec::with_capacity(transcript.segments.len());
+    for (idx, seg) in transcript.segments.iter().enumerate() {
+        let matched = pool.iter_mut().find_map(|slot| {
+            let candidate = slot.as_ref()?;
+            if (candidate.start - seg.start).abs() < 1e-6
+                && (candidate.end - seg.end).abs() < 1e-6
+                && candidate.primary == seg.text
+            {
+                slot.take()
+            } else {
+                None
+            }
+        });
+        let mut entry = matched.unwrap_or_else(|| lokalbot_speech::MultiSttSegment {
+            segment_id: idx,
+            start: seg.start,
+            end: seg.end,
+            speaker: seg.speaker.clone(),
+            primary: seg.text.clone(),
+            tr_backup: String::new(),
+            fast_helper: String::new(),
+            timing_precision: seg.timing_precision,
+            attribution: seg.attribution,
+        });
+        entry.segment_id = idx;
+        entry.speaker = seg.speaker.clone();
+        entry.attribution = seg.attribution;
+        out.push(entry);
+    }
+    out
 }
 
 fn finished_transcript(
@@ -1289,5 +1336,72 @@ mod tests {
         let job = &queue[0];
         assert!(job.transcribe, "the parked work is kept");
         assert!(job.summarize && job.user_initiated && !job.summary_follows_setting);
+    }
+
+    #[test]
+    fn multi_stt_reconcile_and_vocab_guard_preserve_alignment() {
+        assert!(!lokalbot_speech::models::accepts_vocabulary(
+            lokalbot_speech::models::WHISPER_TURBO_MODEL
+        ));
+        let dir = tempfile::tempdir().unwrap();
+        let meeting =
+            lokalbot_core::Meeting::new("Test", "Zoom", chrono::Utc::now(), "2026/11/test");
+        let seg = |start: f64, end: f64, speaker: &str, text: &str| lokalbot_core::Segment {
+            start,
+            end,
+            speaker: speaker.to_string(),
+            text: text.to_string(),
+            confidence: None,
+            timing_precision: Some(lokalbot_core::TimingPrecision::Span),
+            attribution: None,
+        };
+        let multi = |id: usize, start: f64, end: f64, p: &str, b: &str, h: &str| {
+            lokalbot_speech::MultiSttSegment {
+                segment_id: id,
+                start,
+                end,
+                speaker: "them 1".to_string(),
+                primary: p.to_string(),
+                tr_backup: b.to_string(),
+                fast_helper: h.to_string(),
+                timing_precision: Some(lokalbot_core::TimingPrecision::Span),
+                attribution: None,
+            }
+        };
+
+        let mut transcript = Transcript {
+            segments: vec![
+                seg(0.0, 2.0, "them 1", "Kubernetes"),
+                seg(3.0, 5.0, "them 1", "gerçek cümle"),
+            ],
+            ..Default::default()
+        };
+        let previous = vec![
+            multi(0, 0.0, 2.0, "Kubernetes", "kube", "k"),
+            multi(1, 3.0, 5.0, "gerçek cümle", "backup", "helper"),
+        ];
+
+        let primary_id = lokalbot_speech::models::WHISPER_TURBO_MODEL;
+        let prompt = Some("Kubernetes");
+        let guarded_prompt = lokalbot_speech::models::accepts_vocabulary(primary_id)
+            .then_some(prompt)
+            .flatten();
+        assert_eq!(guarded_prompt, None);
+        transcript = finished_transcript(&meeting, dir.path(), None, transcript, guarded_prompt)
+            .unwrap();
+        assert_eq!(transcript.segments.len(), 2);
+
+        let range = lokalbot_core::ContentRange {
+            start: 2.5,
+            end: 6.0,
+        };
+        range.apply(&mut transcript);
+        assert_eq!(transcript.segments.len(), 1);
+        let reconciled = reconcile_multi_segments(&transcript, previous);
+        assert_eq!(reconciled.len(), 1);
+        assert_eq!(reconciled[0].segment_id, 0);
+        assert_eq!(reconciled[0].primary, "gerçek cümle");
+        assert_eq!(reconciled[0].tr_backup, "backup");
+        assert_eq!(reconciled[0].fast_helper, "helper");
     }
 }

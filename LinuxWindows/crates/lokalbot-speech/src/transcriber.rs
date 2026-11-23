@@ -204,7 +204,7 @@ impl Transcriber {
             resolver,
             threads,
             Recognizer::Local { model, asr },
-        );
+        )?;
         log::info!(
             "speech: loaded {} in {:.2}s ({threads} threads)",
             model.display_name,
@@ -220,12 +220,19 @@ impl Transcriber {
         server: Arc<dyn SpeechServer>,
     ) -> Transcriber {
         let threads = effective_threads(threads);
-        Self::with_recognizer_paths(
-            paths,
-            &SpeechModelPaths::default(),
+        let vad = load_vad(paths, &SpeechModelPaths::default(), threads)
+            .unwrap_or_else(|_| Vad::new(None, threads));
+        Transcriber {
+            recognizer: Recognizer::Server { name, server },
+            vad,
+            paths: paths.clone(),
+            resolver: SpeechModelPaths::default(),
             threads,
-            Recognizer::Server { name, server },
-        )
+            diarizer: Mutex::new(None),
+            voices: Mutex::new(None),
+            cancelled: AtomicBool::new(false),
+            decoding: Mutex::new(()),
+        }
     }
 
     fn with_recognizer_paths(
@@ -233,9 +240,9 @@ impl Transcriber {
         resolver: &SpeechModelPaths,
         threads: usize,
         recognizer: Recognizer,
-    ) -> Transcriber {
-        let vad = load_vad(paths, resolver, threads);
-        Transcriber {
+    ) -> Result<Transcriber> {
+        let vad = load_vad(paths, resolver, threads)?;
+        Ok(Transcriber {
             recognizer,
             vad,
             paths: paths.clone(),
@@ -245,7 +252,7 @@ impl Transcriber {
             voices: Mutex::new(None),
             cancelled: AtomicBool::new(false),
             decoding: Mutex::new(()),
-        }
+        })
     }
 
     pub fn display_name(&self) -> &str {
@@ -423,31 +430,39 @@ impl Transcriber {
         }
     }
 
-    fn diarizer(&self) -> Option<Arc<Diarizer>> {
+    fn diarizer(&self) -> Result<Option<Arc<Diarizer>>> {
         let mut slot = self.diarizer.lock();
         if let Some(diarizer) = slot.as_ref() {
-            return Some(Arc::clone(diarizer));
+            return Ok(Some(Arc::clone(diarizer)));
         }
-        let diarizer = Arc::new(load_diarizer(&self.paths, &self.resolver, self.threads)?);
+        let Some(loaded) = load_diarizer(&self.paths, &self.resolver, self.threads)? else {
+            return Ok(None);
+        };
+        let diarizer = Arc::new(loaded);
         *slot = Some(Arc::clone(&diarizer));
-        Some(diarizer)
+        Ok(Some(diarizer))
     }
 
-    fn voice_extractor(&self) -> Option<Arc<VoiceExtractor>> {
+    fn voice_extractor(&self) -> Result<Option<Arc<VoiceExtractor>>> {
         let mut slot = self.voices.lock();
         if let Some(extractor) = slot.as_ref() {
-            return Some(Arc::clone(extractor));
+            return Ok(Some(Arc::clone(extractor)));
         }
         match load_voice_extractor(&self.paths, &self.resolver, self.threads) {
             Ok(extractor) => {
                 let extractor = Arc::new(extractor);
                 *slot = Some(Arc::clone(&extractor));
-                Some(extractor)
+                Ok(Some(extractor))
             }
-            Err(error) => {
+            Err(error)
+                if error
+                    .downcast_ref::<SpeechError>()
+                    .is_some_and(|e| matches!(e, SpeechError::NotInstalled(_))) =>
+            {
                 log::warn!("speech: {error:#}; voices are not measured");
-                None
+                Ok(None)
             }
+            Err(error) => Err(error),
         }
     }
 
@@ -731,7 +746,7 @@ impl Transcriber {
         let mut raw = Vec::new();
         let mut voices = Vec::new();
         if options.diarize
-            && let Some(diarizer) = self.diarizer()
+            && let Some(diarizer) = self.diarizer()?
         {
             progress(TranscribeProgress::IdentifyingSpeakers);
             self.check_cancelled()?;
@@ -756,7 +771,7 @@ impl Transcriber {
                     raw = raw_turns(&turns);
                     diarized = turns.clone();
                     if options.collect_voice_samples
-                        && let Some(extractor) = self.voice_extractor()
+                        && let Some(extractor) = self.voice_extractor()?
                     {
                         voices = voice_samples(&extractor, &samples, &turns, source, &|| {
                             self.cancelled.load(Ordering::Relaxed)
@@ -986,24 +1001,16 @@ impl Transcriber {
     }
 }
 
-fn load_vad(paths: &LibraryPaths, resolver: &SpeechModelPaths, threads: usize) -> Vad {
+fn load_vad(paths: &LibraryPaths, resolver: &SpeechModelPaths, threads: usize) -> Result<Vad> {
     let vad_model = models::vad_model();
-    if models::is_installed_with(paths, resolver, vad_model) {
-        Vad::new(
-            Some(&models::resolve_model_file(
-                paths,
-                resolver,
-                vad_model,
-                vad_model.files[0],
-            )),
-            threads,
-        )
+    if let Some(dir) = models::resolve_installed_dir(paths, resolver, vad_model)? {
+        Ok(Vad::new(Some(&dir.join(vad_model.files[0])), threads))
     } else {
         log::warn!(
             "speech: {} is not installed; using the energy detector",
             vad_model.display_name
         );
-        Vad::new(None, threads)
+        Ok(Vad::new(None, threads))
     }
 }
 
@@ -1011,27 +1018,27 @@ fn load_diarizer(
     paths: &LibraryPaths,
     resolver: &SpeechModelPaths,
     threads: usize,
-) -> Option<Diarizer> {
+) -> Result<Option<Diarizer>> {
     let [segmentation, embedding] = models::diarization_models() else {
-        return None;
+        return Ok(None);
     };
-    if !models::is_installed_with(paths, resolver, segmentation)
-        || !models::is_installed_with(paths, resolver, embedding)
-    {
+    let seg_dir = models::resolve_installed_dir(paths, resolver, segmentation)?;
+    let emb_dir = models::resolve_installed_dir(paths, resolver, embedding)?;
+    let (Some(seg_dir), Some(emb_dir)) = (seg_dir, emb_dir) else {
         log::warn!("speech: speaker models are not installed; skipping speaker separation");
-        return None;
-    }
+        return Ok(None);
+    };
     let loaded = Diarizer::load(
-        &models::resolve_model_file(paths, resolver, segmentation, segmentation.files[0]),
-        &models::resolve_model_file(paths, resolver, embedding, embedding.files[0]),
+        &seg_dir.join(segmentation.files[0]),
+        &emb_dir.join(embedding.files[0]),
         threads,
         CLUSTER_THRESHOLD,
     );
     match loaded {
-        Ok(diarizer) => Some(diarizer),
+        Ok(diarizer) => Ok(Some(diarizer)),
         Err(error) => {
             log::warn!("speech: {error:#}; skipping speaker separation");
-            None
+            Ok(None)
         }
     }
 }
@@ -1044,13 +1051,10 @@ fn load_voice_extractor(
     let [_, embedding] = models::diarization_models() else {
         anyhow::bail!("no voice model");
     };
-    if !models::is_installed_with(paths, resolver, embedding) {
-        anyhow::bail!("the voice model is not installed");
-    }
-    VoiceExtractor::load(
-        &models::resolve_model_file(paths, resolver, embedding, embedding.files[0]),
-        threads,
-    )
+    let Some(emb_dir) = models::resolve_installed_dir(paths, resolver, embedding)? else {
+        return Err(SpeechError::NotInstalled(embedding.display_name.to_string()).into());
+    };
+    VoiceExtractor::load(&emb_dir.join(embedding.files[0]), threads)
 }
 
 pub fn analyze_call_voices(
@@ -1064,16 +1068,15 @@ pub fn analyze_call_voices(
     let [segmentation, embedding] = models::diarization_models() else {
         anyhow::bail!("no voice model");
     };
-    anyhow::ensure!(
-        models::is_installed_with(paths, &resolver, segmentation)
-            && models::is_installed_with(paths, &resolver, embedding),
-        "the voice model is not installed"
-    );
+    let seg_dir = models::resolve_installed_dir(paths, &resolver, segmentation)?
+        .ok_or_else(|| SpeechError::NotInstalled(segmentation.display_name.to_string()))?;
+    let emb_dir = models::resolve_installed_dir(paths, &resolver, embedding)?
+        .ok_or_else(|| SpeechError::NotInstalled(embedding.display_name.to_string()))?;
     let threads = effective_threads(threads);
     let samples = read_track(track, Heard::default(), None)?;
     let diarizer = Diarizer::load(
-        &models::resolve_model_file(paths, &resolver, segmentation, segmentation.files[0]),
-        &models::resolve_model_file(paths, &resolver, embedding, embedding.files[0]),
+        &seg_dir.join(segmentation.files[0]),
+        &emb_dir.join(embedding.files[0]),
         threads,
         CLUSTER_THRESHOLD,
     )?;
@@ -1153,6 +1156,7 @@ fn clean_microphone_with(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare_meeting_pieces(
     paths: &LibraryPaths,
     resolver: &SpeechModelPaths,
@@ -1165,7 +1169,7 @@ pub(crate) fn prepare_meeting_pieces(
     on_identifying_speakers: &mut dyn FnMut(),
 ) -> Result<PreparedMeeting> {
     let threads = effective_threads(threads);
-    let vad = load_vad(paths, resolver, threads);
+    let vad = load_vad(paths, resolver, threads)?;
     let (cleaned, echo_report) = clean_microphone_with(mic, system, options, cancelled)?;
     let gate = match (mic, system, &cleaned) {
         (Some(mic), Some(system), None) => detect_bleed(mic, system),
@@ -1217,7 +1221,7 @@ pub(crate) fn prepare_meeting_pieces(
         let mut track_regions = None;
         if options.diarize {
             if diarizer_slot.is_none() {
-                diarizer_slot = load_diarizer(paths, resolver, threads);
+                diarizer_slot = load_diarizer(paths, resolver, threads)?;
             }
             if let Some(diarizer) = diarizer_slot.as_ref() {
                 on_identifying_speakers();
@@ -1237,7 +1241,16 @@ pub(crate) fn prepare_meeting_pieces(
                         out.turns.push((source, raw_turns(&turns)));
                         if options.collect_voice_samples {
                             if voice_slot.is_none() {
-                                voice_slot = load_voice_extractor(paths, resolver, threads).ok();
+                                match load_voice_extractor(paths, resolver, threads) {
+                                    Ok(extractor) => voice_slot = Some(extractor),
+                                    Err(err)
+                                        if err
+                                            .downcast_ref::<SpeechError>()
+                                            .is_some_and(|e| {
+                                                matches!(e, SpeechError::NotInstalled(_))
+                                            }) => {}
+                                    Err(err) => return Err(err),
+                                }
                             }
                             if let Some(extractor) = voice_slot.as_ref() {
                                 let vs = voice_samples(extractor, &samples, &turns, source, &|| {
@@ -1295,7 +1308,7 @@ pub(crate) fn prepare_samples_pieces(
     max_span: f64,
 ) -> Result<PreparedMeeting> {
     let threads = effective_threads(threads);
-    let vad = load_vad(paths, resolver, threads);
+    let vad = load_vad(paths, resolver, threads)?;
     let duration = samples_16k.len() as f64 / SAMPLE_RATE as f64;
     if duration < MIN_AUDIO_SECONDS {
         return Ok(PreparedMeeting::default());
@@ -2112,5 +2125,46 @@ mod tests {
             ..decoded
         };
         assert!(token_rows(&mismatched, span(0.0, 3.0)).is_none());
+    }
+
+    #[test]
+    fn corrupted_silero_vad_is_rejected_instead_of_falling_back_to_energy_vad() {
+        let user_root = tempfile::tempdir().unwrap();
+        let paths = LibraryPaths::new(user_root.path());
+        let bundle_root = tempfile::tempdir().unwrap();
+        let vad_model = models::vad_model();
+        let vad_dir = bundle_root
+            .path()
+            .join("models")
+            .join("speech")
+            .join(vad_model.id);
+        std::fs::create_dir_all(&vad_dir).unwrap();
+        std::fs::write(vad_dir.join(vad_model.files[0]), b"corrupted-vad-weights").unwrap();
+        models::write_bundled_marker(&vad_dir, vad_model).unwrap();
+
+        let resolver = SpeechModelPaths::with_models_dir(bundle_root.path());
+        let err = match load_vad(&paths, &resolver, 2) {
+            Ok(_) => panic!("expected SHA-256 mismatch error for corrupted silero-vad"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("SHA-256 mismatch"),
+            "unexpected error: {err:#}"
+        );
+
+        let samples = vec![0.1f32; SAMPLE_RATE * 2];
+        let prep_err = prepare_samples_pieces(
+            &paths,
+            &resolver,
+            2,
+            &samples,
+            &TranscribeOptions::default(),
+            28.0,
+        )
+        .unwrap_err();
+        assert!(
+            prep_err.to_string().contains("SHA-256 mismatch"),
+            "unexpected prepare error: {prep_err:#}"
+        );
     }
 }

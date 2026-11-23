@@ -58,6 +58,7 @@ pub struct MultiSttConfig {
     pub whisper_server_bin: Option<PathBuf>,
 }
 
+#[allow(clippy::derivable_impls)]
 impl Default for MultiSttConfig {
     fn default() -> Self {
         Self {
@@ -188,7 +189,7 @@ impl SpeechServer for ServerClient {
 }
 
 impl SpeechCache {
-    pub fn with<T>(
+    pub(crate) fn with<T>(
         &self,
         shared: &Shared,
         model_id: &str,
@@ -201,7 +202,7 @@ impl SpeechCache {
         result
     }
 
-    pub fn with_in_background<T>(
+    pub(crate) fn with_in_background<T>(
         &self,
         shared: &Shared,
         model_id: &str,
@@ -351,7 +352,7 @@ impl SpeechCache {
         models
     }
 
-    pub fn dictation_prompt(&self, shared: &Shared, settings: &Settings) -> String {
+    pub(crate) fn dictation_prompt(&self, shared: &Shared, settings: &Settings) -> String {
         if !settings.auto_transcription_vocabulary
             || !accepts_vocabulary(&settings.transcription_model)
         {
