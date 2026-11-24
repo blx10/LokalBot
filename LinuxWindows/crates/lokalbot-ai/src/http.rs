@@ -1,10 +1,176 @@
+use std::collections::HashSet;
 use std::io::{BufRead, BufReader};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
+use parking_lot::RwLock;
 use serde_json::Value;
 
 use crate::error::AiError;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SystemCaCert {
+    pub name: String,
+    pub store: &'static str,
+}
+
+#[derive(Clone)]
+struct CachedCert {
+    name: String,
+    store: &'static str,
+    cert: ureq::tls::Certificate<'static>,
+}
+
+static TRUST_SYSTEM_ROOT_CERTS: AtomicBool = AtomicBool::new(false);
+static SYSTEM_CERTS: RwLock<Option<Arc<Vec<CachedCert>>>> = RwLock::new(None);
+
+pub fn trust_system_root_certs() -> bool {
+    TRUST_SYSTEM_ROOT_CERTS.load(Ordering::Relaxed)
+}
+
+pub fn set_trust_system_root_certs(enabled: bool) {
+    TRUST_SYSTEM_ROOT_CERTS.store(enabled, Ordering::Relaxed);
+}
+
+pub fn reload_system_root_certs() -> usize {
+    let loaded = Arc::new(load_system_certs());
+    let count = loaded.len();
+    *SYSTEM_CERTS.write() = Some(loaded);
+    count
+}
+
+pub fn system_ca_certs() -> Vec<SystemCaCert> {
+    let cached = cached_system_certs();
+    let mut seen = HashSet::new();
+    let mut out: Vec<SystemCaCert> = cached
+        .iter()
+        .filter(|entry| seen.insert((entry.name.clone(), entry.store)))
+        .map(|entry| SystemCaCert {
+            name: entry.name.clone(),
+            store: entry.store,
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        a.name
+            .to_lowercase()
+            .cmp(&b.name.to_lowercase())
+            .then_with(|| a.store.cmp(b.store))
+    });
+    out
+}
+
+fn cached_system_certs() -> Arc<Vec<CachedCert>> {
+    if let Some(existing) = SYSTEM_CERTS.read().as_ref() {
+        return Arc::clone(existing);
+    }
+    let mut guard = SYSTEM_CERTS.write();
+    if let Some(existing) = guard.as_ref() {
+        return Arc::clone(existing);
+    }
+    let loaded = Arc::new(load_system_certs());
+    *guard = Some(Arc::clone(&loaded));
+    loaded
+}
+
+#[cfg(windows)]
+fn load_system_certs() -> Vec<CachedCert> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Security::Cryptography::{
+        CERT_CONTEXT, CERT_NAME_SIMPLE_DISPLAY_TYPE, CertCloseStore, CertEnumCertificatesInStore,
+        CertGetNameStringW, CertOpenSystemStoreW, X509_ASN_ENCODING,
+    };
+
+    unsafe fn cert_display_name(ctx: *const CERT_CONTEXT) -> String {
+        let mut buf = [0u16; 256];
+        let len = unsafe {
+            CertGetNameStringW(
+                ctx,
+                CERT_NAME_SIMPLE_DISPLAY_TYPE,
+                0,
+                std::ptr::null(),
+                buf.as_mut_ptr(),
+                buf.len() as u32,
+            )
+        };
+        if len > 1 {
+            let text = String::from_utf16_lossy(&buf[..(len - 1) as usize]);
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+        "Unnamed certificate".to_string()
+    }
+
+    let mut out = Vec::new();
+    for store_name in ["ROOT", "CA", "AuthRoot"] {
+        let wide: Vec<u16> = OsStr::new(store_name)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        unsafe {
+            let store = CertOpenSystemStoreW(0, wide.as_ptr());
+            if store.is_null() {
+                continue;
+            }
+            let mut ctx = std::ptr::null_mut();
+            loop {
+                ctx = CertEnumCertificatesInStore(store, ctx);
+                if ctx.is_null() {
+                    break;
+                }
+                let record = &*ctx;
+                if (record.dwCertEncodingType & X509_ASN_ENCODING) != 0
+                    && !record.pbCertEncoded.is_null()
+                    && record.cbCertEncoded > 0
+                {
+                    let der = std::slice::from_raw_parts(
+                        record.pbCertEncoded,
+                        record.cbCertEncoded as usize,
+                    );
+                    out.push(CachedCert {
+                        name: cert_display_name(ctx),
+                        store: store_name,
+                        cert: ureq::tls::Certificate::from_der(der).to_owned(),
+                    });
+                }
+            }
+            CertCloseStore(store, 0);
+        }
+    }
+    out
+}
+
+#[cfg(not(windows))]
+fn load_system_certs() -> Vec<CachedCert> {
+    Vec::new()
+}
+
+pub(crate) fn apply_tls_config(
+    mut builder: ureq::config::ConfigBuilder<ureq::typestate::AgentScope>,
+) -> ureq::config::ConfigBuilder<ureq::typestate::AgentScope> {
+    if trust_system_root_certs() {
+        let cached = cached_system_certs();
+        if !cached.is_empty() {
+            let certs: Vec<ureq::tls::Certificate<'static>> =
+                cached.iter().map(|entry| entry.cert.clone()).collect();
+            builder = builder.tls_config(
+                ureq::tls::TlsConfig::builder()
+                    .root_certs(ureq::tls::RootCerts::new_with_certs(&certs))
+                    .build(),
+            );
+        }
+    }
+    builder
+}
+
+fn uses_direct_connection(base_url: &str) -> bool {
+    lokalbot_core::access::is_loopback_url(base_url)
+        || lokalbot_core::access::is_private_network_url(base_url)
+}
 
 pub(crate) fn agent(base_url: &str, timeout: Duration) -> ureq::Agent {
     let mut builder = ureq::Agent::config_builder()
@@ -13,9 +179,10 @@ pub(crate) fn agent(base_url: &str, timeout: Duration) -> ureq::Agent {
         .user_agent(concat!("LokalBot/", env!("CARGO_PKG_VERSION")))
         .timeout_connect(Some(Duration::from_secs(10)))
         .timeout_global(Some(timeout));
-    if lokalbot_core::access::is_loopback_url(base_url) {
+    if uses_direct_connection(base_url) {
         builder = builder.proxy(None);
     }
+    builder = apply_tls_config(builder);
     ureq::Agent::new_with_config(builder.build())
 }
 
@@ -552,5 +719,30 @@ mod tests {
             assert_eq!(retry_after(value), None, "{value}");
         }
         assert_eq!(retry_after("Wed, 21 Oct 2026 07:28:00 GMT"), None);
+    }
+
+    #[test]
+    fn uses_direct_connection_detects_loopback_and_private_network() {
+        assert!(uses_direct_connection("https://ai-gateway.example.local/v1"));
+        assert!(uses_direct_connection("http://10.0.0.10:8080/v1"));
+        assert!(uses_direct_connection("http://127.0.0.1:1234/v1"));
+        assert!(!uses_direct_connection("https://api.openai.com/v1"));
+    }
+
+    #[test]
+    fn system_root_cert_toggle_round_trips() {
+        let initial = trust_system_root_certs();
+        set_trust_system_root_certs(true);
+        assert!(trust_system_root_certs());
+        set_trust_system_root_certs(false);
+        assert!(!trust_system_root_certs());
+        set_trust_system_root_certs(initial);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_certificate_store_loads_system_cas() {
+        assert!(reload_system_root_certs() > 0);
+        assert!(!system_ca_certs().is_empty());
     }
 }

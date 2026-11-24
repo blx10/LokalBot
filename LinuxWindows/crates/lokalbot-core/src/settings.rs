@@ -67,6 +67,7 @@ pub struct Settings {
     pub transcription_language: String,
     pub transcription_prompt: String,
     pub auto_transcription_vocabulary: bool,
+    pub trust_system_root_certs: bool,
     pub summarizer_backend: SummarizerBackend,
     #[serde(rename = "builtInModelID")]
     pub built_in_model_id: String,
@@ -281,6 +282,7 @@ impl Default for Settings {
             transcription_language: "auto".into(),
             transcription_prompt: String::new(),
             auto_transcription_vocabulary: true,
+            trust_system_root_certs: false,
             summarizer_backend: SummarizerBackend::BuiltIn,
             built_in_model_id: "qwen3.5-4b-lokalbot-v4".into(),
             ollama_base_url: "http://localhost:11434".into(),

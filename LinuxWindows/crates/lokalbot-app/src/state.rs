@@ -445,6 +445,7 @@ impl AppData {
             log::error!("saving settings failed: {err}");
         }
         let (inference_label, remote_hosts) = inference_presentation(&settings);
+        lokalbot_ai::http::set_trust_system_root_certs(settings.trust_system_root_certs);
         let privacy = PrivacyLine::new(&settings);
         let settings_category = SettingsCategory::from_key(&settings.settings_page);
         Self {
@@ -1095,6 +1096,7 @@ impl AppData {
             crate::i18n::apply(&self.settings.app_language, cx);
         }
         lokalbot_core::SpeakerAttribution::set_microphone_is_user(self.settings.microphone_is_user);
+        lokalbot_ai::http::set_trust_system_root_certs(self.settings.trust_system_root_certs);
         let (label, hosts) = inference_presentation(&self.settings);
         self.inference_label = label;
         self.remote_hosts = hosts;

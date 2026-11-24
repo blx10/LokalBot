@@ -13,7 +13,7 @@ pub mod dream_rollup;
 pub mod embeddings;
 mod error;
 pub mod follow_up;
-mod http;
+pub mod http;
 pub mod hugging_face;
 pub mod json;
 pub mod language;

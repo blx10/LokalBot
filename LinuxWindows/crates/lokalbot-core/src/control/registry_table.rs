@@ -1656,5 +1656,14 @@ pub(super) fn table() -> Vec<SettingSpec> {
             "gpu vulkan cuda nvidia cpu acceleration",
             "Which llama.cpp build runs the built-in models. Automatic chooses Vulkan or CPU; CUDA is opt-in.",
         ),
+        e(
+            "trustSystemRootCerts",
+            General,
+            "Windows certificate store",
+            Bool,
+            Consent,
+            "tls ssl ca certificate root store corporate proxy",
+            "Add root and intermediate CA certificates from the Windows certificate store alongside built-in webpki-roots.",
+        ),
     ]
 }

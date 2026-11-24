@@ -103,6 +103,7 @@ impl Shared {
         runtime: lokalbot_ai::runtime::RuntimeManager,
         emit: Box<dyn Fn(EngineEvent) + Send + Sync>,
     ) -> Arc<Self> {
+        lokalbot_ai::http::set_trust_system_root_certs(settings.trust_system_root_certs);
         Arc::new(Shared {
             library,
             settings: RwLock::new(settings),
@@ -565,6 +566,7 @@ fn dispatch(shared: Arc<Shared>, commands: Sender<Command>, receiver: Receiver<C
                 );
                 lokalbot_ai::download_source::set_source(settings.model_download_source);
                 lokalbot_ai::catalog::set_custom(&settings.custom_built_in_models);
+                lokalbot_ai::http::set_trust_system_root_certs(settings.trust_system_root_certs);
                 *shared.settings.write() = *settings;
                 file_search.settings_changed(&shared.settings());
                 screen_vectors.conditions_changed();
