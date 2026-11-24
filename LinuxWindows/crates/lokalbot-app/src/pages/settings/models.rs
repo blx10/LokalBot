@@ -822,16 +822,25 @@ impl SettingsPage {
     }
 
     pub(super) fn change_button(&self, role: Role, cx: &mut Context<Self>) -> AnyElement {
-        let settings = self.data.read(cx).settings.clone();
+        enum MenuEntry {
+            Header(&'static str),
+            Separator,
+            Item(ModelChoice),
+        }
+
+        let (settings, config_profile) = {
+            let data = self.data.read(cx);
+            (data.settings.clone(), data.config_profile.clone())
+        };
         let page = cx.entity();
-        let options: Vec<ModelChoice> = match role {
+        let options: Vec<MenuEntry> = match role {
             Role::Transcribe => lokalbot_speech::models::transcription_models()
                 .iter()
                 .map(|m| {
                     let primary = (settings.transcription_mode
                         == lokalbot_core::config_profile::TranscriptionMode::AsymmetricMultiStt)
                         .then(|| m.id.to_string());
-                    (
+                    MenuEntry::Item((
                         SharedString::from(format!(
                             "{} · {}",
                             m.display_name,
@@ -844,47 +853,74 @@ impl SettingsPage {
                             ..Default::default()
                         },
                         m.display_name.to_string(),
-                    )
+                    ))
                 })
                 .collect(),
             Role::Think => {
-                let mut items: Vec<ModelChoice> = lokalbot_ai::catalog::think_entries()
-                    .map(|m| {
-                        (
-                            SharedString::from(format!(
-                                "{} · {}",
-                                m.display_name,
-                                size_label(m.size_bytes)
-                            )),
-                            settings.summarizer_backend == SummarizerBackend::BuiltIn
-                                && settings.built_in_model_id == m.id,
-                            ModelPatch {
-                                backend: Some(SummarizerBackend::BuiltIn),
-                                assistant_model_id: Some(m.id.to_string()),
-                                ..Default::default()
-                            },
-                            m.display_name.to_string(),
-                        )
-                    })
-                    .collect();
-                let server = |title: &'static str, backend| -> ModelChoice {
-                    (
+                let (remote_url, remote_models) =
+                    configured_remote_think_models(&settings, config_profile.as_ref());
+                let mut items = vec![MenuEntry::Header(lokalbot_i18n::tr("Remote"))];
+                for model in &remote_models {
+                    items.push(MenuEntry::Item((
+                        SharedString::from(remote_think_model_label(model, remote_url.as_deref())),
+                        settings.summarizer_backend == SummarizerBackend::OpenAICompatible
+                            && settings.openai_model == *model,
+                        ModelPatch {
+                            backend: Some(SummarizerBackend::OpenAICompatible),
+                            openai_base_url: remote_url.clone(),
+                            openai_model: Some(model.clone()),
+                            ..Default::default()
+                        },
+                        model.clone(),
+                    )));
+                }
+                let server = |title: &'static str, backend, checked| -> MenuEntry {
+                    MenuEntry::Item((
                         lokalbot_i18n::tr(title).into(),
-                        settings.summarizer_backend == backend,
+                        checked,
                         ModelPatch {
                             backend: Some(backend),
                             ..Default::default()
                         },
                         lokalbot_i18n::tr(title).to_string(),
-                    )
+                    ))
                 };
-                items.push(server("Ollama server", SummarizerBackend::Ollama));
                 items.push(server(
                     "OpenAI-compatible server",
                     SummarizerBackend::OpenAICompatible,
+                    settings.summarizer_backend == SummarizerBackend::OpenAICompatible
+                        && !remote_models.iter().any(|m| m == &settings.openai_model),
+                ));
+                items.push(server(
+                    "Ollama server",
+                    SummarizerBackend::Ollama,
+                    settings.summarizer_backend == SummarizerBackend::Ollama,
                 ));
                 for plan in SubscriptionPlan::ALL {
-                    items.push(server(plan.title(), plan.backend()));
+                    items.push(server(
+                        plan.title(),
+                        plan.backend(),
+                        settings.summarizer_backend == plan.backend(),
+                    ));
+                }
+                items.push(MenuEntry::Separator);
+                items.push(MenuEntry::Header(lokalbot_i18n::tr("On this PC")));
+                for m in lokalbot_ai::catalog::think_entries() {
+                    items.push(MenuEntry::Item((
+                        SharedString::from(format!(
+                            "{} · {}",
+                            m.display_name,
+                            size_label(m.size_bytes)
+                        )),
+                        settings.summarizer_backend == SummarizerBackend::BuiltIn
+                            && settings.built_in_model_id == m.id,
+                        ModelPatch {
+                            backend: Some(SummarizerBackend::BuiltIn),
+                            assistant_model_id: Some(m.id.to_string()),
+                            ..Default::default()
+                        },
+                        m.display_name.to_string(),
+                    )));
                 }
                 items
             }
@@ -892,7 +928,7 @@ impl SettingsPage {
                 &settings.cotyping_built_in_model_id,
             ))
             .map(|m| {
-                (
+                MenuEntry::Item((
                     SharedString::from(format!(
                         "{} · {}",
                         m.display_name,
@@ -904,7 +940,7 @@ impl SettingsPage {
                         ..Default::default()
                     },
                     m.display_name.to_string(),
-                )
+                ))
             })
             .collect(),
         };
@@ -942,33 +978,46 @@ impl SettingsPage {
                 let data = page.read(cx).data.clone();
                 let installed = data.read(cx).models.installed.clone();
                 menu = menu.scrollable(options.len() > 12);
-                for (label, checked, patch, title) in options.iter() {
-                    let page = page.clone();
-                    let patch = patch.clone();
-                    let title = title.clone();
-                    let already = *checked;
-                    let needs_download =
-                        shows_download_mark(already, downloadable_model_id(&patch), &installed);
-                    menu = menu.item(
-                        PopupMenuItem::new(label.clone())
-                            .checked(*checked)
-                            .when(needs_download, |item| item.icon(Icon::new(Ico::Download)))
-                            .on_click(move |_, _, cx| {
-                                if already {
-                                    return;
-                                }
-                                page.update(cx, |page, cx| {
-                                    let data = page.data.clone();
-                                    page.models.setup.apply(
-                                        patch.clone(),
-                                        title.clone(),
-                                        &data,
-                                        cx,
-                                    );
-                                    cx.notify();
-                                });
-                            }),
-                    );
+                for entry in options.iter() {
+                    match entry {
+                        MenuEntry::Header(title) => {
+                            menu = menu.label(*title);
+                        }
+                        MenuEntry::Separator => {
+                            menu = menu.separator();
+                        }
+                        MenuEntry::Item((label, checked, patch, title)) => {
+                            let page = page.clone();
+                            let patch = patch.clone();
+                            let title = title.clone();
+                            let already = *checked;
+                            let needs_download = shows_download_mark(
+                                already,
+                                downloadable_model_id(patch),
+                                &installed,
+                            );
+                            menu = menu.item(
+                                PopupMenuItem::new(label.clone())
+                                    .checked(*checked)
+                                    .when(needs_download, |item| item.icon(Icon::new(Ico::Download)))
+                                    .on_click(move |_, _, cx| {
+                                        if already {
+                                            return;
+                                        }
+                                        page.update(cx, |page, cx| {
+                                            let data = page.data.clone();
+                                            page.models.setup.apply(
+                                                patch.clone(),
+                                                title.clone(),
+                                                &data,
+                                                cx,
+                                            );
+                                            cx.notify();
+                                        });
+                                    }),
+                            );
+                        }
+                    }
                 }
                 if !links.is_empty() {
                     menu = menu.separator();
@@ -2478,6 +2527,51 @@ pub(super) fn role_setting(role: Role) -> &'static str {
     }
 }
 
+pub(crate) fn configured_remote_think_models(
+    settings: &Settings,
+    config_profile: Option<&lokalbot_core::ConfigProfile>,
+) -> (Option<String>, Vec<String>) {
+    let remote_url = [
+        Some(settings.openai_base_url.as_str())
+            .filter(|u| !lokalbot_core::access::is_loopback_url(u)),
+        config_profile.map(|c| c.think.base_url.as_str()),
+        Some(settings.post_correction_base_url.as_str()),
+        Some(settings.openai_base_url.as_str()),
+    ]
+    .into_iter()
+    .flatten()
+    .map(str::trim)
+    .find(|u| !u.is_empty())
+    .map(str::to_string);
+
+    let mut models = Vec::new();
+    let mut push = |raw: &str| {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty()
+            && !lokalbot_ai::post_correction::is_local_catalog_model(trimmed)
+            && !models.iter().any(|existing: &String| existing == trimmed)
+        {
+            models.push(trimmed.to_string());
+        }
+    };
+    push(&settings.openai_model);
+    if let Some(profile) = config_profile {
+        push(&profile.think.model);
+    }
+    push(&settings.post_correction_primary_judge_model);
+    for critic in &settings.post_correction_support_critic_models {
+        push(critic);
+    }
+    (remote_url, models)
+}
+
+pub(crate) fn remote_think_model_label(model: &str, remote_url: Option<&str>) -> String {
+    let location = remote_url
+        .and_then(lokalbot_core::access::host_of)
+        .unwrap_or_else(|| lokalbot_i18n::tr("Remote API").to_string());
+    format!("{model} · {location}")
+}
+
 pub(super) fn think_name(settings: &Settings) -> String {
     match settings.summarizer_backend {
         SummarizerBackend::BuiltIn => model_name(&settings.built_in_model_id),
@@ -2837,5 +2931,49 @@ mod tests {
             "sk-new-456"
         );
         assert_eq!(resolve_masked_api_key_edit("sk-real-123", "", true), "");
+    }
+
+    #[test]
+    fn configured_remote_think_models_reads_config_without_local_sizes() {
+        let mut settings = Settings {
+            post_correction_base_url: "https://ai-gateway.example.local/v1".into(),
+            post_correction_primary_judge_model: "Qwen/Qwen3.8-27B".into(),
+            post_correction_support_critic_models: vec![
+                "gemma-4-31B-it".into(),
+                "qwen3.5-4b".into(),
+                "gpt-oss-120b".into(),
+            ],
+            ..Settings::default()
+        };
+        let mut profile = lokalbot_core::ConfigProfile::default();
+        profile.think.model = "Qwen3.8-27B".into();
+
+        let (url, models) = configured_remote_think_models(&settings, Some(&profile));
+        assert_eq!(url.as_deref(), Some("https://ai-gateway.example.local/v1"));
+        assert_eq!(
+            models,
+            vec![
+                "Qwen3.8-27B",
+                "Qwen/Qwen3.8-27B",
+                "gemma-4-31B-it",
+                "gpt-oss-120b",
+            ]
+        );
+        let label = remote_think_model_label(&models[0], url.as_deref());
+        assert_eq!(label, "Qwen3.8-27B · ai-gateway.example.local");
+        assert!(!label.contains("GB"));
+        assert!(!label.contains("MB"));
+
+        settings.openai_model = "gpt-oss-120b".into();
+        let (_, deduped) = configured_remote_think_models(&settings, Some(&profile));
+        assert_eq!(
+            deduped,
+            vec![
+                "gpt-oss-120b",
+                "Qwen3.8-27B",
+                "Qwen/Qwen3.8-27B",
+                "gemma-4-31B-it",
+            ]
+        );
     }
 }

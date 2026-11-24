@@ -27,6 +27,8 @@ pub struct ModelPatch {
     pub transcription_fast_helper_model: Option<String>,
     pub remote_transcription_base_url: Option<String>,
     pub remote_transcription_model: Option<String>,
+    pub openai_base_url: Option<String>,
+    pub openai_model: Option<String>,
     pub backend: Option<SummarizerBackend>,
     pub assistant_model_id: Option<String>,
     pub autocomplete_model_id: Option<String>,
@@ -61,6 +63,12 @@ impl ModelPatch {
         }
         if let Some(model) = &self.remote_transcription_model {
             settings.remote_transcription_model = model.clone();
+        }
+        if let Some(url) = &self.openai_base_url {
+            settings.openai_base_url = url.clone();
+        }
+        if let Some(model) = &self.openai_model {
+            settings.openai_model = model.clone();
         }
         if let Some(backend) = self.backend {
             settings.summarizer_backend = backend;
@@ -119,6 +127,14 @@ impl ModelPatch {
                 .remote_transcription_model
                 .as_ref()
                 .map(|_| settings.remote_transcription_model.clone()),
+            openai_base_url: self
+                .openai_base_url
+                .as_ref()
+                .map(|_| settings.openai_base_url.clone()),
+            openai_model: self
+                .openai_model
+                .as_ref()
+                .map(|_| settings.openai_model.clone()),
             backend: self.backend.map(|_| settings.summarizer_backend),
             assistant_model_id: self
                 .assistant_model_id
@@ -135,7 +151,52 @@ impl ModelPatch {
     }
 
     pub fn matches(&self, settings: &Settings) -> bool {
-        self.inverse(settings) == *self
+        self.transcription
+            .as_ref()
+            .is_none_or(|v| settings.transcription_model == *v)
+            && self
+                .transcription_mode
+                .is_none_or(|v| settings.transcription_mode == v)
+            && self
+                .transcription_primary_model
+                .as_ref()
+                .is_none_or(|v| settings.transcription_models.primary.id == *v)
+            && self
+                .transcription_backup_model
+                .as_ref()
+                .is_none_or(|v| settings.transcription_models.tr_backup.id == *v)
+            && self
+                .transcription_fast_helper_model
+                .as_ref()
+                .is_none_or(|v| settings.transcription_models.fast_helper.id == *v)
+            && self
+                .remote_transcription_base_url
+                .as_ref()
+                .is_none_or(|v| settings.remote_transcription_base_url == *v)
+            && self
+                .remote_transcription_model
+                .as_ref()
+                .is_none_or(|v| settings.remote_transcription_model == *v)
+            && self
+                .openai_base_url
+                .as_ref()
+                .is_none_or(|v| settings.openai_base_url == *v)
+            && self
+                .openai_model
+                .as_ref()
+                .is_none_or(|v| settings.openai_model == *v)
+            && self.backend.is_none_or(|v| settings.summarizer_backend == v)
+            && self
+                .assistant_model_id
+                .as_ref()
+                .is_none_or(|v| settings.built_in_model_id == *v)
+            && self
+                .autocomplete_model_id
+                .as_ref()
+                .is_none_or(|v| settings.cotyping_built_in_model_id == *v)
+            && self
+                .post_correction_enabled
+                .is_none_or(|v| settings.post_correction_enabled == v)
     }
 
     pub fn needs(&self, settings: &Settings) -> Vec<String> {
@@ -688,5 +749,28 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(downloadable_patch.needs(&settings), ["parakeet-v3"]);
+    }
+
+    #[test]
+    fn switching_from_asymmetric_multi_stt_to_single_preset_matches_previous() {
+        use super::super::models::Preset;
+        use lokalbot_core::config_profile::TranscriptionMode;
+
+        let settings = Settings {
+            transcription_mode: TranscriptionMode::AsymmetricMultiStt,
+            transcription_model: lokalbot_speech::models::WHISPER_TURBO_MODEL.into(),
+            ..Default::default()
+        };
+        for preset in [Preset::Balanced, Preset::Lightweight] {
+            let patch = preset.patch();
+            let previous = patch.inverse(&settings);
+            assert!(previous.matches(&settings));
+            let mut after = settings.clone();
+            patch.apply(&mut after);
+            assert!(patch.matches(&after));
+            assert_eq!(after.transcription_mode, TranscriptionMode::Single);
+            previous.apply(&mut after);
+            assert_eq!(after.transcription_mode, TranscriptionMode::AsymmetricMultiStt);
+        }
     }
 }

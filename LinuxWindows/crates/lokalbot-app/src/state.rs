@@ -1329,7 +1329,7 @@ pub fn inference_presentation(settings: &Settings) -> (SharedString, Vec<SharedS
     {
         hosts.push(host.into());
     }
-    if settings.post_correction_enabled
+    if post_correction_uses_remote_endpoint(settings)
         && !settings.post_correction_base_url.trim().is_empty()
         && !lokalbot_core::access::is_loopback_url(&settings.post_correction_base_url)
     {
@@ -1355,7 +1355,7 @@ pub enum PrivacyLine {
 
 impl PrivacyLine {
     pub fn new(settings: &Settings) -> Self {
-        let post_correction_blocked = settings.post_correction_enabled
+        let post_correction_blocked = post_correction_uses_remote_endpoint(settings)
             && !settings.post_correction_base_url.trim().is_empty()
             && lokalbot_core::access::remote_block_reason(
                 &settings.post_correction_base_url,
@@ -1420,7 +1420,7 @@ pub fn remote_ai_hosts(settings: &Settings) -> Vec<String> {
     {
         add(host);
     }
-    if settings.post_correction_enabled
+    if post_correction_uses_remote_endpoint(settings)
         && !settings.post_correction_base_url.trim().is_empty()
         && !lokalbot_core::access::is_loopback_url(&settings.post_correction_base_url)
         && let Some(host) = lokalbot_core::access::host_of(&settings.post_correction_base_url)
@@ -1428,6 +1428,21 @@ pub fn remote_ai_hosts(settings: &Settings) -> Vec<String> {
         add(host);
     }
     hosts
+}
+
+fn post_correction_uses_remote_endpoint(settings: &Settings) -> bool {
+    if !settings.post_correction_enabled {
+        return false;
+    }
+    let judge = settings.post_correction_primary_judge_model.trim();
+    !lokalbot_ai::post_correction::is_local_catalog_model(judge)
+        || settings
+            .post_correction_support_critic_models
+            .iter()
+            .any(|m| {
+                !m.trim().is_empty()
+                    && !lokalbot_ai::post_correction::is_local_catalog_model(m)
+            })
 }
 
 fn config_fields_changed(before: &Settings, after: &Settings) -> bool {
@@ -1595,6 +1610,28 @@ mod tests {
                 blocked: false,
                 hosts: vec!["pc-gateway.example".into()],
             }
+        );
+    }
+
+    #[test]
+    fn post_correction_local_models_do_not_report_remote_host() {
+        let mut settings = Settings {
+            post_correction_enabled: true,
+            post_correction_base_url: "https://ai-gateway.example/v1".into(),
+            post_correction_primary_judge_model: "qwen3.5-4b".into(),
+            post_correction_support_critic_models: vec!["qwen3.5-4b".into()],
+            ..Default::default()
+        };
+        assert!(remote_ai_hosts(&settings).is_empty());
+        assert_eq!(PrivacyLine::new(&settings), PrivacyLine::Local);
+        assert!(inference_presentation(&settings).1.is_empty());
+
+        settings
+            .post_correction_support_critic_models
+            .push("gpt-oss-120b".into());
+        assert_eq!(
+            remote_ai_hosts(&settings),
+            vec!["ai-gateway.example".to_string()]
         );
     }
 

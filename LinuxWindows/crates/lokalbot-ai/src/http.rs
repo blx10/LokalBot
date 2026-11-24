@@ -100,7 +100,8 @@ fn unreachable(base: &str, err: ureq::Error) -> anyhow::Error {
         "text engine transport failure host={} error={err}",
         host_label(base)
     );
-    AiError::ServerUnreachable(base.to_string()).into()
+    let reason = crate::sanitize::redact(&err.to_string());
+    AiError::ServerUnreachable(format!("{base} ({reason})")).into()
 }
 
 pub(crate) fn host_label(url: &str) -> String {
@@ -258,7 +259,8 @@ impl LineStream {
                     "text engine stream failure host={} error={err}",
                     host_label(base)
                 );
-                Err(AiError::ServerUnreachable(base.to_string()).into())
+                let reason = crate::sanitize::redact(&err.to_string());
+                Err(AiError::ServerUnreachable(format!("{base} ({reason})")).into())
             }
         }
     }
@@ -578,5 +580,16 @@ mod tests {
             assert_eq!(retry_after(value), None, "{value}");
         }
         assert_eq!(retry_after("Wed, 21 Oct 2026 07:28:00 GMT"), None);
+    }
+
+    #[test]
+    fn unreachable_includes_sanitized_transport_reason() {
+        let err = unreachable(
+            "https://example.invalid/v1/chat/completions",
+            ureq::Error::HostNotFound,
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("https://example.invalid/v1/chat/completions"));
+        assert!(msg.contains("HostNotFound") || msg.contains("host"));
     }
 }

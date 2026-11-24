@@ -1516,6 +1516,27 @@ mod tests {
     }
 
     #[test]
+    fn local_post_correction_models_show_ok_status_even_with_saved_remote_url() {
+        let settings = Settings {
+            post_correction_enabled: true,
+            post_correction_base_url: "https://ai-gateway.example/v1".into(),
+            post_correction_primary_judge_model: "qwen3.5-4b".into(),
+            post_correction_support_critic_models: vec!["qwen3.5-4b".into()],
+            ..Default::default()
+        };
+        let s = status(StatusInput {
+            settings,
+            models: ready_models(),
+            ..Default::default()
+        });
+        assert!(s.everything_stays_here());
+        let lines = s.lines(Page::Models);
+        assert_eq!(lines[0].tone, Tone::Ok);
+        assert!(!lines[0].text.contains("Some AI runs online"));
+        assert!(!lines[0].text.contains("ai-gateway.example"));
+    }
+
+    #[test]
     fn history_goes_back_and_forward_and_forgets_forward_on_a_new_page() {
         let mut history = PageHistory::new(Page::Overview);
         assert!(!history.can_go_back());
