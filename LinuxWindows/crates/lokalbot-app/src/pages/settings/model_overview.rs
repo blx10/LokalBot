@@ -440,7 +440,7 @@ impl SettingsPage {
             if multi_on && row.role == Role::Transcribe {
                 roles = self.append_multi_stt_transcribe_rows(roles, &settings, compact, cx);
             }
-            if multi_on && row.role == Role::Think {
+            if (multi_on || settings.post_correction_enabled) && row.role == Role::Think {
                 roles = roles.row(
                     "settings.postCorrection",
                     settings_row::content_row(

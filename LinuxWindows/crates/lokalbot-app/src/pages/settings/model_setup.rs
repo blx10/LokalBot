@@ -30,6 +30,7 @@ pub struct ModelPatch {
     pub backend: Option<SummarizerBackend>,
     pub assistant_model_id: Option<String>,
     pub autocomplete_model_id: Option<String>,
+    pub post_correction_enabled: Option<bool>,
 }
 
 impl ModelPatch {
@@ -69,6 +70,9 @@ impl ModelPatch {
         }
         if let Some(id) = &self.autocomplete_model_id {
             settings.cotyping_built_in_model_id = id.clone();
+        }
+        if let Some(enabled) = self.post_correction_enabled {
+            settings.post_correction_enabled = enabled;
         }
     }
 
@@ -124,6 +128,9 @@ impl ModelPatch {
                 .autocomplete_model_id
                 .as_ref()
                 .map(|_| settings.cotyping_built_in_model_id.clone()),
+            post_correction_enabled: self
+                .post_correction_enabled
+                .map(|_| settings.post_correction_enabled),
         }
     }
 

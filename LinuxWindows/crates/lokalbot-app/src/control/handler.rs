@@ -55,8 +55,8 @@ fn stage_state(stage: &ProcessingStage) -> &'static str {
         ProcessingStage::WaitingForModels => "waitingForModels",
         ProcessingStage::PreparingModel(_) => "preparing",
         ProcessingStage::Transcribing => "transcribing",
-        ProcessingStage::PostCorrecting => "postCorrecting",
         ProcessingStage::IdentifyingSpeakers => "identifyingSpeakers",
+        ProcessingStage::PostCorrecting => "postCorrecting",
         ProcessingStage::Summarizing => "summarizing",
         ProcessingStage::Failed(_) => "failed",
     }
@@ -70,8 +70,8 @@ fn stage_message(stage: &ProcessingStage) -> String {
         }
         ProcessingStage::PreparingModel(model) => format!("Preparing {model}…"),
         ProcessingStage::Transcribing => "Transcribing…".into(),
-        ProcessingStage::PostCorrecting => "Post-correcting transcript…".into(),
         ProcessingStage::IdentifyingSpeakers => "Identifying speakers…".into(),
+        ProcessingStage::PostCorrecting => "Refining transcript…".into(),
         ProcessingStage::Summarizing => "Summarizing…".into(),
         ProcessingStage::Failed(message) => format!("Failed: {message}"),
     }

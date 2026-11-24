@@ -297,6 +297,7 @@ impl Preset {
         let (speech, think) = self.models();
         settings.transcription_mode
             == lokalbot_core::config_profile::TranscriptionMode::Single
+            && !settings.post_correction_enabled
             && settings.summarizer_backend == SummarizerBackend::BuiltIn
             && settings.transcription_model == speech
             && settings.built_in_model_id == think
@@ -327,6 +328,7 @@ impl Preset {
             transcription_mode: Some(lokalbot_core::config_profile::TranscriptionMode::Single),
             backend: Some(SummarizerBackend::BuiltIn),
             assistant_model_id: Some(think.to_string()),
+            post_correction_enabled: Some(false),
             ..Default::default()
         }
     }
@@ -1911,17 +1913,45 @@ impl SettingsPage {
                 .child(div().text_size(ty::BODY).text_color(lb.text).child(label))
                 .child(Input::new(input))
         };
+        let mut remote_models: Vec<String> = Vec::new();
+        let mut push_remote_model = |candidate: &str| {
+            let trimmed = candidate.trim();
+            if !trimmed.is_empty()
+                && !lokalbot_ai::post_correction::is_local_catalog_model(trimmed)
+                && !remote_models.iter().any(|existing| existing == trimmed)
+            {
+                remote_models.push(trimmed.to_string());
+            }
+        };
+        push_remote_model(&draft_judge);
+        for critic in &draft_critics {
+            push_remote_model(critic);
+        }
+        push_remote_model(&settings.post_correction_primary_judge_model);
+        for critic in &settings.post_correction_support_critic_models {
+            push_remote_model(critic);
+        }
+        push_remote_model(&settings.openai_model);
+        let default_pc = lokalbot_ai::post_correction::PostCorrectionConfig::default();
+        push_remote_model(&default_pc.primary_judge_model);
+        for critic in &default_pc.support_critic_models {
+            push_remote_model(critic);
+        }
+
         let judge_input = self.models.post_correction_judge.clone();
         let judge_page = cx.entity();
         let judge_current = draft_judge.clone();
+        let judge_remote = remote_models.clone();
         let judge_local_picker = Button::new("settings-pc-judge-local")
             .outline()
             .small()
-            .label(lokalbot_i18n::tr("Local models…"))
+            .label(lokalbot_i18n::tr("Change…"))
             .dropdown_caret(true)
             .dropdown_menu(move |mut menu, _, _| {
                 let entries: Vec<_> = lokalbot_ai::catalog::think_entries().collect();
-                menu = menu.scrollable(entries.len() > 12);
+                menu = menu
+                    .scrollable(entries.len() + judge_remote.len() > 12)
+                    .label(lokalbot_i18n::tr("Local"));
                 for entry in entries {
                     let input = judge_input.clone();
                     let page = judge_page.clone();
@@ -1941,19 +1971,43 @@ impl SettingsPage {
                             }),
                     );
                 }
+                if !judge_remote.is_empty() {
+                    menu = menu.separator().label(lokalbot_i18n::tr("Remote Server"));
+                    for model in &judge_remote {
+                        let input = judge_input.clone();
+                        let page = judge_page.clone();
+                        let id = model.clone();
+                        menu = menu.item(
+                            PopupMenuItem::new(model.clone())
+                                .checked(judge_current == *model)
+                                .on_click(move |_, window, cx| {
+                                    input.update(cx, |field, cx| {
+                                        field.set_value(id.clone(), window, cx);
+                                    });
+                                    page.update(cx, |page, cx| {
+                                        page.models.post_correction_saved = None;
+                                        cx.notify();
+                                    });
+                                }),
+                        );
+                    }
+                }
                 menu
             });
         let critics_input = self.models.post_correction_critics.clone();
         let critics_page = cx.entity();
         let critics_current = draft_critics.clone();
+        let critics_remote = remote_models;
         let critics_local_picker = Button::new("settings-pc-critics-local")
             .outline()
             .small()
-            .label(lokalbot_i18n::tr("Local models…"))
+            .label(lokalbot_i18n::tr("Change…"))
             .dropdown_caret(true)
             .dropdown_menu(move |mut menu, _, _| {
                 let entries: Vec<_> = lokalbot_ai::catalog::think_entries().collect();
-                menu = menu.scrollable(entries.len() > 12);
+                menu = menu
+                    .scrollable(entries.len() + critics_remote.len() > 12)
+                    .label(lokalbot_i18n::tr("Local"));
                 for entry in entries {
                     let input = critics_input.clone();
                     let page = critics_page.clone();
@@ -1985,6 +2039,40 @@ impl SettingsPage {
                                 });
                             }),
                     );
+                }
+                if !critics_remote.is_empty() {
+                    menu = menu.separator().label(lokalbot_i18n::tr("Remote Server"));
+                    for model in &critics_remote {
+                        let input = critics_input.clone();
+                        let page = critics_page.clone();
+                        let id = model.clone();
+                        let checked = critics_current.iter().any(|m| m == model);
+                        menu = menu.item(
+                            PopupMenuItem::new(model.clone())
+                                .checked(checked)
+                                .on_click(move |_, window, cx| {
+                                    input.update(cx, |field, cx| {
+                                        let mut items: Vec<String> = field
+                                            .value()
+                                            .split(',')
+                                            .map(str::trim)
+                                            .filter(|m| !m.is_empty())
+                                            .map(str::to_string)
+                                            .collect();
+                                        if items.iter().any(|m| m == &id) {
+                                            items.retain(|m| m != &id);
+                                        } else {
+                                            items.push(id.clone());
+                                        }
+                                        field.set_value(items.join(", "), window, cx);
+                                    });
+                                    page.update(cx, |page, cx| {
+                                        page.models.post_correction_saved = None;
+                                        cx.notify();
+                                    });
+                                }),
+                        );
+                    }
                 }
                 menu
             });
@@ -2700,6 +2788,30 @@ mod tests {
             lokalbot_core::config_profile::TranscriptionMode::Single
         );
         assert!(Preset::Balanced.matches(&settings));
+    }
+
+    #[test]
+    fn local_preset_disables_remote_post_correction_and_clears_privacy_line() {
+        let mut settings = Settings {
+            post_correction_enabled: true,
+            post_correction_base_url: "https://ai-gateway.example/v1".into(),
+            post_correction_primary_judge_model: "Qwen3.8-27B".into(),
+            ..Settings::default()
+        };
+        assert!(!Preset::Balanced.matches(&settings));
+        assert_eq!(
+            crate::state::remote_ai_hosts(&settings),
+            vec!["ai-gateway.example".to_string()]
+        );
+
+        Preset::Balanced.patch().apply(&mut settings);
+        assert!(!settings.post_correction_enabled);
+        assert!(Preset::Balanced.matches(&settings));
+        assert!(crate::state::remote_ai_hosts(&settings).is_empty());
+        assert_eq!(
+            crate::state::PrivacyLine::new(&settings),
+            crate::state::PrivacyLine::Local
+        );
     }
 
     #[test]
