@@ -33,6 +33,40 @@ pub struct ModelPatch {
     pub assistant_model_id: Option<String>,
     pub autocomplete_model_id: Option<String>,
     pub post_correction_enabled: Option<bool>,
+    pub disable_local_llama_server: Option<bool>,
+}
+
+fn clear_disable_local_llama_server_keys(settings: &mut Settings) {
+    settings.other.remove("disable_local_llama_server");
+    if let Some(serde_json::Value::Object(think)) = settings.other.get_mut("think") {
+        think.remove("disableLocalLlamaServer");
+        think.remove("disable_local_llama_server");
+    }
+}
+
+fn has_legacy_disable_local_llama_server(settings: &Settings) -> bool {
+    if settings
+        .other
+        .get("disable_local_llama_server")
+        .and_then(|v| v.as_bool())
+        == Some(true)
+    {
+        return true;
+    }
+    settings
+        .other
+        .get("think")
+        .and_then(|v| v.as_object())
+        .is_some_and(|think| {
+            think
+                .get("disableLocalLlamaServer")
+                .and_then(|v| v.as_bool())
+                == Some(true)
+                || think
+                    .get("disable_local_llama_server")
+                    .and_then(|v| v.as_bool())
+                    == Some(true)
+        })
 }
 
 impl ModelPatch {
@@ -81,6 +115,10 @@ impl ModelPatch {
         }
         if let Some(enabled) = self.post_correction_enabled {
             settings.post_correction_enabled = enabled;
+        }
+        if let Some(disabled) = self.disable_local_llama_server {
+            settings.disable_local_llama_server = disabled;
+            clear_disable_local_llama_server_keys(settings);
         }
     }
 
@@ -147,6 +185,9 @@ impl ModelPatch {
             post_correction_enabled: self
                 .post_correction_enabled
                 .map(|_| settings.post_correction_enabled),
+            disable_local_llama_server: self
+                .disable_local_llama_server
+                .map(|_| settings.disable_local_llama_server),
         }
     }
 
@@ -197,6 +238,9 @@ impl ModelPatch {
             && self
                 .post_correction_enabled
                 .is_none_or(|v| settings.post_correction_enabled == v)
+            && self
+                .disable_local_llama_server
+                .is_none_or(|v| settings.disable_local_llama_server == v)
     }
 
     pub fn needs(&self, settings: &Settings) -> Vec<String> {
@@ -304,6 +348,7 @@ pub struct Change {
 struct Pending {
     change: Change,
     original: Settings,
+    expected: ModelPatch,
     needs: Vec<String>,
 }
 
@@ -351,7 +396,19 @@ impl ModelSetup {
             return;
         }
         let needs = change.patch.needs(&original);
+        let enable_local_llama_server = change.patch.disable_local_llama_server == Some(false)
+            && (original.disable_local_llama_server
+                || has_legacy_disable_local_llama_server(&original));
         data.update(cx, |data, cx| {
+            if enable_local_llama_server {
+                data.update_settings(
+                    |s| {
+                        s.disable_local_llama_server = false;
+                        clear_disable_local_llama_server_keys(s);
+                    },
+                    cx,
+                );
+            }
             data.downloads
                 .retain(|id, download| !(needs.contains(id) && download.error.is_some()));
             data.cancelled_downloads.clear();
@@ -361,9 +418,12 @@ impl ModelSetup {
                 }
             }
         });
+        let prep_baseline = data.read(cx).settings.clone();
+        let expected = change.patch.inverse(&prep_baseline);
         self.pending = Some(Pending {
             change,
             original,
+            expected,
             needs,
         });
         self.poll(data, cx);
@@ -405,12 +465,15 @@ impl ModelSetup {
             return;
         }
         let Some(Pending {
-            change, original, ..
+            change,
+            original,
+            expected,
+            ..
         }) = self.pending.take()
         else {
             return;
         };
-        let refusal = if !change.previous.matches(&latest) {
+        let refusal = if !expected.matches(&latest) {
             Some(lokalbot_i18n::tr("The model selection changed while preparing. Your newer selection was kept. Choose the model again to switch.").to_string())
         } else if !change.patch.preparation_context_matches(&latest, &original) {
             Some(lokalbot_i18n::tr("The model files or connection changed while preparing. Your changes were kept. Choose the model again to switch.").to_string())
@@ -772,5 +835,52 @@ mod tests {
             previous.apply(&mut after);
             assert_eq!(after.transcription_mode, TranscriptionMode::AsymmetricMultiStt);
         }
+    }
+
+    #[test]
+    fn disable_local_llama_server_patch_round_trips_and_clears_legacy_keys() {
+        let mut settings = Settings {
+            disable_local_llama_server: true,
+            ..Default::default()
+        };
+        settings
+            .other
+            .insert("disable_local_llama_server".into(), serde_json::json!(true));
+        settings.other.insert(
+            "think".into(),
+            serde_json::json!({
+                "disableLocalLlamaServer": true,
+                "disable_local_llama_server": true,
+                "otherKey": "keep"
+            }),
+        );
+        assert!(has_legacy_disable_local_llama_server(&settings));
+
+        let patch = ModelPatch {
+            disable_local_llama_server: Some(false),
+            ..Default::default()
+        };
+        let inverse = patch.inverse(&settings);
+        assert_eq!(inverse.disable_local_llama_server, Some(true));
+        assert!(inverse.matches(&settings));
+        assert!(!patch.matches(&settings));
+
+        let mut after = settings.clone();
+        patch.apply(&mut after);
+        assert!(!after.disable_local_llama_server);
+        assert!(patch.matches(&after));
+        assert!(!has_legacy_disable_local_llama_server(&after));
+        assert_eq!(
+            after
+                .other
+                .get("think")
+                .and_then(|v| v.get("otherKey"))
+                .and_then(|v| v.as_str()),
+            Some("keep")
+        );
+
+        inverse.apply(&mut after);
+        assert!(after.disable_local_llama_server);
+        assert!(inverse.matches(&after));
     }
 }

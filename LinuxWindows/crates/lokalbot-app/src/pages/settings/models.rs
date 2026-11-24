@@ -298,6 +298,7 @@ impl Preset {
         settings.transcription_mode
             == lokalbot_core::config_profile::TranscriptionMode::Single
             && !settings.post_correction_enabled
+            && !settings.disable_local_llama_server
             && settings.summarizer_backend == SummarizerBackend::BuiltIn
             && settings.transcription_model == speech
             && settings.built_in_model_id == think
@@ -329,6 +330,7 @@ impl Preset {
             backend: Some(SummarizerBackend::BuiltIn),
             assistant_model_id: Some(think.to_string()),
             post_correction_enabled: Some(false),
+            disable_local_llama_server: Some(false),
             ..Default::default()
         }
     }
@@ -2975,5 +2977,29 @@ mod tests {
                 "gemma-4-31B-it",
             ]
         );
+    }
+
+    #[test]
+    fn local_presets_reenable_local_llama_server_and_require_it_for_matching() {
+        for preset in [Preset::Balanced, Preset::Lightweight] {
+            let mut settings = Settings {
+                disable_local_llama_server: true,
+                ..Settings::default()
+            };
+            settings
+                .other
+                .insert("disable_local_llama_server".into(), serde_json::json!(true));
+            assert!(!preset.matches(&settings));
+
+            let patch = preset.patch();
+            assert_eq!(patch.disable_local_llama_server, Some(false));
+            patch.apply(&mut settings);
+            assert!(!settings.disable_local_llama_server);
+            assert!(!settings.other.contains_key("disable_local_llama_server"));
+            assert!(preset.matches(&settings));
+
+            settings.disable_local_llama_server = true;
+            assert!(!preset.matches(&settings));
+        }
     }
 }
