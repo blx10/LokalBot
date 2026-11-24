@@ -84,6 +84,7 @@ pub struct Settings {
     pub post_correction_max_concurrent_batches: usize,
     pub post_correction_continue_on_critic_failure: bool,
     pub disable_local_llama_server: bool,
+    pub trust_system_root_certs: bool,
     #[serde(skip)]
     pub post_correction_api_key: String,
     #[serde(skip)]
@@ -319,6 +320,7 @@ impl Default for Settings {
             post_correction_max_concurrent_batches: 2,
             post_correction_continue_on_critic_failure: true,
             disable_local_llama_server: false,
+            trust_system_root_certs: false,
             post_correction_api_key: String::new(),
             think_api_key: String::new(),
             summarizer_backend: SummarizerBackend::BuiltIn,

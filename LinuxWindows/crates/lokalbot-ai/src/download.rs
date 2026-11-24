@@ -229,15 +229,15 @@ fn installed(dest: &Path, size: u64, sha256: &str) -> bool {
 }
 
 fn download_agent(options: &Options) -> ureq::Agent {
-    let config = ureq::Agent::config_builder()
+    let builder = ureq::Agent::config_builder()
         .https_only(!options.allow_loopback_http)
         .http_status_as_error(false)
         .max_redirects(10)
         .max_idle_connections(0)
         .user_agent(concat!("LokalBot/", env!("CARGO_PKG_VERSION")))
         .timeout_connect(Some(Duration::from_secs(30)))
-        .timeout_recv_response(Some(Duration::from_secs(60)))
-        .build();
+        .timeout_recv_response(Some(Duration::from_secs(60)));
+    let config = crate::http::apply_tls_config(builder).build();
     ureq::Agent::new_with_config(config)
 }
 

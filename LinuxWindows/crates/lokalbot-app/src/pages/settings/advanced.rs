@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use crate::i18n::h_flex;
 use gpui_kit::component::button::Button;
+use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::{Icon, Sizable as _, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{AppContext as _, Context, ParentElement as _, SharedString, Styled as _, px};
@@ -432,7 +433,100 @@ impl SettingsPage {
 
         let resources = self.resource_monitor_section(cx);
         let mut sections = self.memory_health_sections(cx);
-        sections.extend([setup, diagnostics, resources, system]);
+        sections.extend([setup, diagnostics]);
+        if cfg!(windows) {
+            let enabled = self.data.read(cx).settings.trust_system_root_certs;
+            let certs = if enabled {
+                lokalbot_ai::http::system_ca_certs()
+            } else {
+                Vec::new()
+            };
+            let switch_data = data.clone();
+            let reload_data = data.clone();
+            let reload_page = cx.entity();
+            let count_text = if enabled {
+                format!("{} certificates loaded from Windows store", certs.len())
+            } else {
+                "Off · using built-in webpki-roots only".to_string()
+            };
+            let list_certs = certs.clone();
+            let certificates = Section::new("TLS certificates")
+                .row(
+                    "settings.trustSystemRootCerts",
+                    settings_row::row(
+                        "settings.trustSystemRootCerts",
+                        "Windows certificate store",
+                        Some(
+                            "Add root and intermediate CA certificates from the Windows certificate store (ROOT, CA, AuthRoot) alongside built-in webpki-roots for HTTPS connections."
+                                .into(),
+                        ),
+                        settings_row::switch(
+                            "settings.trustSystemRootCerts",
+                            enabled,
+                            move |on, _, cx| {
+                                switch_data.update(cx, |d, cx| {
+                                    d.update_settings(|s| s.trust_system_root_certs = on, cx)
+                                });
+                            },
+                        ),
+                        self.is_focused("settings.trustSystemRootCerts"),
+                        cx,
+                    ),
+                )
+                .row(
+                    "settings.windowsCaCerts",
+                    settings_row::row(
+                        "settings.windowsCaCerts",
+                        "Corporate & system CAs",
+                        Some(count_text.into()),
+                        h_flex()
+                            .gap(px(8.))
+                            .child(
+                                Button::new("settings-windows-ca-list")
+                                    .outline()
+                                    .small()
+                                    .label("Certificates…")
+                                    .dropdown_caret(true)
+                                    .dropdown_menu(move |mut menu, _, _| {
+                                        if list_certs.is_empty() {
+                                            menu = menu.item(PopupMenuItem::new(
+                                                "No certificates loaded",
+                                            ));
+                                        } else {
+                                            menu = menu.scrollable(list_certs.len() > 12);
+                                            for cert in &list_certs {
+                                                menu = menu.item(PopupMenuItem::new(format!(
+                                                    "{} · {}",
+                                                    cert.name, cert.store
+                                                )));
+                                            }
+                                        }
+                                        menu
+                                    }),
+                            )
+                            .child(
+                                Button::new("settings-windows-ca-reload")
+                                    .outline()
+                                    .small()
+                                    .label("Reload")
+                                    .on_click(move |_, _, cx| {
+                                        let count = lokalbot_ai::http::reload_system_root_certs();
+                                        reload_data.update(cx, |d, cx| {
+                                            d.show_message(
+                                                format!("Reloaded {count} Windows certificates."),
+                                                cx,
+                                            )
+                                        });
+                                        reload_page.update(cx, |_, cx| cx.notify());
+                                    }),
+                            ),
+                        self.is_focused("settings.windowsCaCerts"),
+                        cx,
+                    ),
+                );
+            sections.push(certificates);
+        }
+        sections.extend([resources, system]);
         sections
     }
 }
