@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 
 use crate::error::AiError;
 use crate::json::{complete_records, extract_json_object, strip_code_fence, strip_reasoning};
-use crate::think::ChatRequest;
+use crate::think::{ChatRequest, TaskReasoning};
 
 use super::{CorrectionCandidate, CriticModelResult, MultiSttSegment, PostCorrector};
 
@@ -101,7 +101,7 @@ pub(crate) fn build_request(
     }
     ChatRequest::new(CRITIC_SYSTEM_PROMPT, user)
         .temperature(0.0)
-        .reasoning_budget(0)
+        .reasoning(TaskReasoning::Off)
         .json_schema(schema())
 }
 

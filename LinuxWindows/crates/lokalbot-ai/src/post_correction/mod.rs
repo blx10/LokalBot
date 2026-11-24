@@ -18,8 +18,8 @@ use crate::error::{AiError, ai_error};
 use crate::http;
 use crate::sanitize;
 use crate::think::{
-    ChatRequest, Dialect, chat_body, consent, parse_chat_completion, resolve_api_key, trimmed_base,
-    with_data_policy,
+    ChatRequest, Dialect, RequestReasoning, chat_body, consent, parse_chat_completion,
+    resolve_api_key, trimmed_base, with_data_policy,
 };
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -330,7 +330,18 @@ impl PostCorrector {
                 plain
             };
             let body = with_data_policy(
-                chat_body(dialect, model, &effective_request, None, None, &[]),
+                chat_body(
+                    dialect,
+                    model,
+                    &effective_request,
+                    RequestReasoning {
+                        level: None,
+                        allowance: 0,
+                        default_off: false,
+                        takes_effort: false,
+                    },
+                    &[],
+                ),
                 self.data_policy,
             );
             let remaining = timeout.saturating_sub(started.elapsed());
