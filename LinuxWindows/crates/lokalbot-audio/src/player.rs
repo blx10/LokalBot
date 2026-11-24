@@ -1,12 +1,14 @@
 use std::num::NonZero;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use parking_lot::Mutex;
 
 use crate::decode::TrackReader;
+use crate::output::{default_output_key, open_default_sink, should_reopen_on_error};
 use crate::stretch::{SampleSource, Wsola};
 use crate::wav::SAMPLE_RATE;
 
@@ -146,6 +148,20 @@ impl State {
 
 struct Output {
     _stop: crossbeam_channel::Sender<()>,
+    device_key: Arc<Mutex<Option<String>>>,
+    alive: Arc<AtomicBool>,
+}
+
+struct AliveGuard(Arc<AtomicBool>);
+
+impl Drop for AliveGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+fn should_reuse_output(alive: bool, opened_key: Option<&str>, current_key: Option<&str>) -> bool {
+    alive && opened_key.is_some() && opened_key == current_key
 }
 
 struct PlayerSource {
@@ -248,35 +264,110 @@ impl Player {
 
     fn ensure_output(&self) -> Result<()> {
         let mut output = self.output.lock();
-        if output.is_some() {
-            return Ok(());
+        let current_key = default_output_key();
+        if let Some(existing) = output.as_ref() {
+            let opened_key = existing.device_key.lock().clone();
+            if should_reuse_output(
+                existing.alive.load(Ordering::Acquire),
+                opened_key.as_deref(),
+                current_key.as_deref(),
+            ) {
+                return Ok(());
+            }
+            *output = None;
         }
         let (stop_tx, stop_rx) = crossbeam_channel::bounded::<()>(0);
         let (ready_tx, ready_rx) = crossbeam_channel::bounded::<Result<(), String>>(1);
-        let source = PlayerSource {
-            state: Arc::clone(&self.state),
-            block: Vec::new(),
-            index: 0,
-        };
+        let (reconnect_tx, reconnect_rx) = crossbeam_channel::bounded::<()>(1);
+        let alive = Arc::new(AtomicBool::new(true));
+        let device_key = Arc::new(Mutex::new(None));
+        let alive_thread = Arc::clone(&alive);
+        let device_key_thread = Arc::clone(&device_key);
+        let state = Arc::clone(&self.state);
         std::thread::Builder::new()
             .name("lokalbot-playback".into())
-            .spawn(
-                move || match rodio::DeviceSinkBuilder::open_default_sink() {
-                    Ok(mut sink) => {
-                        sink.log_on_drop(false);
-                        sink.mixer().add(source);
-                        let _ = ready_tx.send(Ok(()));
-                        let _ = stop_rx.recv();
-                    }
+            .spawn(move || {
+                let _guard = AliveGuard(alive_thread);
+                let open_for_state = || {
+                    let tx = reconnect_tx.clone();
+                    let (mut sink, key) = open_default_sink(move |err| {
+                        if should_reopen_on_error(&err) {
+                            let _ = tx.try_send(());
+                        }
+                    })?;
+                    sink.log_on_drop(false);
+                    sink.mixer().add(PlayerSource {
+                        state: Arc::clone(&state),
+                        block: Vec::new(),
+                        index: 0,
+                    });
+                    Ok::<_, rodio::DeviceSinkError>((sink, key))
+                };
+                let (sink, initial_key) = match open_for_state() {
+                    Ok(opened) => opened,
                     Err(error) => {
                         let _ = ready_tx.send(Err(error.to_string()));
+                        return;
                     }
-                },
-            )
+                };
+                *device_key_thread.lock() = initial_key;
+                let _ = ready_tx.send(Ok(()));
+
+                let reopen = |current_sink: &mut Option<rodio::MixerDeviceSink>| -> bool {
+                    *current_sink = None;
+                    for attempt in 0..10 {
+                        if attempt > 0 {
+                            match stop_rx.recv_timeout(Duration::from_millis(150)) {
+                                Ok(()) | Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                                    return false;
+                                }
+                                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+                            }
+                        }
+                        if let Ok((new_sink, new_key)) = open_for_state() {
+                            *current_sink = Some(new_sink);
+                            *device_key_thread.lock() = new_key;
+                            return true;
+                        }
+                    }
+                    false
+                };
+
+                let mut active_sink = Some(sink);
+                loop {
+                    crossbeam_channel::select! {
+                        recv(stop_rx) -> _ => break,
+                        recv(reconnect_rx) -> _ => {
+                            while reconnect_rx.try_recv().is_ok() {}
+                            if !reopen(&mut active_sink) {
+                                state.lock().playing = false;
+                                break;
+                            }
+                        }
+                        recv(crossbeam_channel::after(Duration::from_secs(1))) -> _ => {
+                            if !state.lock().playing {
+                                break;
+                            }
+                            let now_key = default_output_key();
+                            let opened_key = device_key_thread.lock().clone();
+                            if now_key.is_some() && now_key != opened_key {
+                                if !reopen(&mut active_sink) {
+                                    state.lock().playing = false;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            })
             .context("could not start playback")?;
         match ready_rx.recv_timeout(Duration::from_secs(10)) {
             Ok(Ok(())) => {
-                *output = Some(Output { _stop: stop_tx });
+                *output = Some(Output {
+                    _stop: stop_tx,
+                    device_key,
+                    alive,
+                });
                 Ok(())
             }
             Ok(Err(error)) => Err(anyhow!("Could not open the speakers: {error}")),
@@ -331,9 +422,12 @@ impl Player {
     }
 
     pub fn pause(&self) {
-        let mut state = self.state.lock();
-        state.playing = false;
-        state.end_at = None;
+        {
+            let mut state = self.state.lock();
+            state.playing = false;
+            state.end_at = None;
+        }
+        *self.output.lock() = None;
     }
 
     pub fn toggle(&self) -> Result<()> {
@@ -599,5 +693,43 @@ mod tests {
         assert_eq!(rendered.len(), 12_000);
         assert!(!player.is_playing());
         assert!((player.position() - 1.75).abs() < 1e-9);
+    }
+
+    #[test]
+    fn should_reuse_output_requires_alive_and_matching_device_key() {
+        assert!(should_reuse_output(
+            true,
+            Some("id-1|Headset"),
+            Some("id-1|Headset")
+        ));
+        assert!(!should_reuse_output(
+            true,
+            Some("id-0|Speakers"),
+            Some("id-1|Headset")
+        ));
+        assert!(!should_reuse_output(
+            false,
+            Some("id-1|Headset"),
+            Some("id-1|Headset")
+        ));
+        assert!(!should_reuse_output(true, None, Some("id-1|Headset")));
+        assert!(!should_reuse_output(true, Some("id-1|Headset"), None));
+    }
+
+    #[test]
+    fn pause_releases_cached_output_handle() {
+        let (_dir, player) = player_with(&vec![0.25; 16_000], &vec![0.0; 16_000]);
+        let (stop_tx, _stop_rx) = crossbeam_channel::bounded::<()>(0);
+        *player.output.lock() = Some(Output {
+            _stop: stop_tx,
+            device_key: Arc::new(Mutex::new(Some("id-0|Speakers".to_string()))),
+            alive: Arc::new(AtomicBool::new(true)),
+        });
+        player.state.lock().playing = true;
+
+        player.pause();
+
+        assert!(!player.is_playing());
+        assert!(player.output.lock().is_none());
     }
 }
