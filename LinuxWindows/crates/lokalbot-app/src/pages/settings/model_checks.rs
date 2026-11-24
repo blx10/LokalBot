@@ -354,6 +354,21 @@ pub struct GenerationFailure {
     pub technical_details: String,
 }
 
+fn is_tls_certificate_error(details: &str) -> bool {
+    [
+        "certificate",
+        "unknownissuer",
+        "unknown issuer",
+        "badcertificate",
+        "bad certificate",
+        "webpki",
+        "tls handshake",
+        "ssl handshake",
+    ]
+    .iter()
+    .any(|needle| details.contains(needle))
+}
+
 impl GenerationFailure {
     pub fn new(
         error: &str,
@@ -373,6 +388,22 @@ impl GenerationFailure {
             || details.contains("openrouter.ai/settings/privacy");
         let technical_details = error.to_string();
         if !(is_open_router && is_data_policy) {
+            if is_tls_certificate_error(&details) {
+                return Self {
+                    title: lokalbot_i18n::tr("TLS certificate error").to_string(),
+                    explanation: lokalbot_i18n::tr(
+                        "LokalBot could not verify this server's TLS certificate.",
+                    )
+                    .to_string(),
+                    recovery: lokalbot_i18n::tr(
+                        "Open Settings → Diagnostics → TLS certificates, enable \"Windows certificate store\" (or click Reload), then run Check connection again.",
+                    )
+                    .to_string(),
+                    privacy_note: None,
+                    action: None,
+                    technical_details,
+                };
+            }
             return Self {
                 title: lokalbot_i18n::tr("Generation test failed").to_string(),
                 explanation: lokalbot_i18n::tr("LokalBot couldn't complete the test request.")
@@ -524,5 +555,28 @@ mod tests {
         };
         assert!(result_label(&result(None)).starts_with("Check passed · "));
         assert_eq!(result_label(&result(Some("boom"))), "Check failed: boom");
+    }
+
+    #[test]
+    fn tls_certificate_failures_point_to_diagnostics_tls_certificates() {
+        for err in [
+            "invalid peer certificate: UnknownIssuer",
+            "TLS handshake failed: certificate verify failed",
+        ] {
+            let failure = GenerationFailure::new(
+                err,
+                Some("https://ai-gateway.example.local/v1"),
+                Some("model"),
+                OpenRouterDataPolicy::PrivateOnly,
+            );
+            assert_eq!(failure.title, "TLS certificate error");
+            assert!(
+                failure
+                    .recovery
+                    .contains("Settings → Diagnostics → TLS certificates")
+            );
+            assert!(failure.recovery.contains("Windows certificate store"));
+            assert_eq!(failure.technical_details, err);
+        }
     }
 }
