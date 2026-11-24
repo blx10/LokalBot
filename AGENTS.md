@@ -7,6 +7,9 @@ LokalBot is a private work-memory app for macOS, with a Windows and Linux app (`
 - Complete the requested scope through relevant verification and correction of failures caused by the change. Reuse authorization already given; ask when a material decision or action exceeds that scope. Keep reviews and audits read-only unless implementation is requested.
 - Open pull requests as drafts while still pushing fixes, and mark them ready for review when complete. The required UI suite (about an hour of macOS runner time) runs only on pull requests that are ready for review.
 - Preserve unrelated work. When committing is authorized, stage only task files. Publication, releases, and production changes require authorization covering those actions.
+- **Sensitive organization/personnel data (GitHub prohibition):** Never commit, push, or upload any information related to any employer, bank/company, or personnel/employees (names, accounts, internal details, logs, screenshots, or other references) to GitHub (including commits, pull requests, issues, or comments). If any such information is detected in staged/changed files or requested to be uploaded to GitHub, stop immediately and warn the user.
+- **Atomic feature isolation:** Every new feature must be self-contained and atomically isolated from other fork features—both at the git branch level (branching cleanly from `upstream/master` when targeting upstream PRs, without stacking unrelated features) and at the code/schema/UI/i18n level (no cross-feature config fields, dead UI controls, or shared wiring to unmerged features) so any feature can be opened as an independent upstream PR or dropped without affecting others.
+- **Fork feature summary table ("özet tablo"):** Whenever the user asks for "özet tablo", inspect the current fork branches/stack, `FORK_PATCHES.md`, and code-level coupling against `upstream/master`, and present an up-to-date Markdown table with the columns `Grup`, `Dallar`, and `Upstream PR durumu`.
 - Run checks relevant to the change and required by the repository. Repeat or broaden them when new changes, failures, or unresolved risks justify it. Documentation-only edits need link and diff checks, not an app build.
 - Never run UI tests locally on this MacBook. Use hosted CI or a remote runner; `Scripts/test/ui-tests.sh --remote` is the explicit remote entry point. Local compilation and non-UI tests are allowed. Verify the tested revision includes the requested changes.
 - When a change alters what an existing test expects, list it under the pull request template's **Changed test expectations** with the reason.
@@ -28,6 +31,13 @@ Read the relevant sections when the task touches them:
 - Where a new file goes: [Project layout](Docs/development/project-layout.md). Scratch output (previews, exports, drafts, evidence you don't commit) goes in `Local/`, which git ignores, not in new top-level folders.
 - Video work: [Video/AGENTS.md](Video/AGENTS.md) and the selected project's guide.
 - Retrieving recorded work through the CLI or MCP: [.agents/skills/lokalbot-cli/SKILL.md](.agents/skills/lokalbot-cli/SKILL.md).
+
+## Fast Windows Rust builds & tests
+
+- Always run `cargo` from inside `LinuxWindows/` (`Push-Location LinuxWindows` / `cd LinuxWindows`), never from the repo root with `--manifest-path LinuxWindows/Cargo.toml`. Cargo resolves `.cargo/config.toml` from `cwd`, so running from the repo root skips `LinuxWindows/.cargo/config.toml` (`+crt-static`), invalidates the `target/` cache, and forces a full 400+ crate rebuild.
+- Never override `RUSTFLAGS` without preserving `-C target-feature=+crt-static` (required by `sherpa-onnx`).
+- Keep test commands scoped: run lightweight crates (e.g., `lokalbot-i18n`, `lokalbot-core`) separately from `lokalbot-engine`, and use `cargo check` for quick compile checks.
+- Machine-local accelerators (`sccache`, `lld-link`) belong in `%USERPROFILE%\.cargo\config.toml`, not in tracked `LinuxWindows/.cargo/config.toml`. Ensure `rustup` default host is `x86_64-pc-windows-msvc` (`rustup set default-host x86_64-pc-windows-msvc`) so `LinuxWindows/rust-toolchain.toml` resolves to MSVC rather than `-gnu`.
 
 Report whether the requested result was built, tested, installed, or released, with any concrete blocker and remaining work. A successful build or CI run alone does not establish installation or release completion.
 
