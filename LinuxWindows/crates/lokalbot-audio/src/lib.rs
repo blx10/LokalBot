@@ -5,6 +5,7 @@ mod decode;
 mod export;
 mod import;
 mod mic_capture;
+mod output;
 mod player;
 #[cfg(windows)]
 mod process_loopback;

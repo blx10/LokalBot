@@ -75,7 +75,7 @@ impl SpeechPlayer {
         std::thread::Builder::new()
             .name("lokalbot-speech-output".into())
             .spawn(
-                move || match rodio::DeviceSinkBuilder::open_default_sink() {
+                move || match crate::output::open_default_sink_simple() {
                     Ok(mut sink) => {
                         sink.log_on_drop(false);
                         sink.mixer().add(clip);

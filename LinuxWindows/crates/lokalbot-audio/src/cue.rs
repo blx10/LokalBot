@@ -23,7 +23,7 @@ pub fn play_start() {
     let spawned = std::thread::Builder::new()
         .name("lokalbot-dictation-cue".into())
         .spawn(|| {
-            let Ok(mut sink) = rodio::DeviceSinkBuilder::open_default_sink() else {
+            let Ok(mut sink) = crate::output::open_default_sink_simple() else {
                 log::debug!("no audio output for the dictation cue");
                 return;
             };
