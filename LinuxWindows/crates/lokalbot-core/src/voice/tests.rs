@@ -934,7 +934,7 @@ fn relaxed_suggestions_cross_channel_same_person_and_live_suggestions() {
     );
     memory
         .choose(
-            &Choice::new("them 1", Some("Alper".into()), DecisionAction::Assign),
+            &Choice::new("them 1", Some("Alex".into()), DecisionAction::Assign),
             &first,
             &saved,
         )
@@ -943,7 +943,7 @@ fn relaxed_suggestions_cross_channel_same_person_and_live_suggestions() {
     assert_eq!(profiles.len(), 1);
     let other_voice = call_samples("them 1", 40);
     assert_eq!(
-        same_person("alper", &other_voice, &profiles),
+        same_person("alex", &other_voice, &profiles),
         Some(profiles[0].id)
     );
     assert_eq!(same_person("Other", &other_voice, &profiles), None);
@@ -974,7 +974,7 @@ fn relaxed_suggestions_cross_channel_same_person_and_live_suggestions() {
     let cross = matches_with_options(&mic_query, &profiles, true);
     assert_eq!(cross.len(), 1);
     assert_eq!(cross[0].tier, MatchTier::Suggested);
-    assert_eq!(cross[0].name, "Alper");
+    assert_eq!(cross[0].name, "Alex");
 
     let old_meeting = meeting(&library);
     let old_transcript = call_transcript("them 1");
@@ -986,7 +986,7 @@ fn relaxed_suggestions_cross_channel_same_person_and_live_suggestions() {
     );
     let old_state = memory.state(&old_meeting).unwrap();
     let live = live_suggestions(Some(&old_state), Some(&old_transcript), &profiles);
-    assert_eq!(live["them 1"][0].name, "Alper");
+    assert_eq!(live["them 1"][0].name, "Alex");
 }
 
 #[test]
@@ -1090,7 +1090,7 @@ fn merge_profiles_combines_contributions_and_rejects_mismatched_local_user() {
             name_automatically: true,
         })
         .unwrap();
-    let mut confirm = Choice::new("me", Some("Alper".into()), DecisionAction::ConfirmUser);
+    let mut confirm = Choice::new("me", Some("Alex".into()), DecisionAction::ConfirmUser);
     confirm.action = DecisionAction::ConfirmUser;
     memory.choose(&confirm, &local, &local_saved).unwrap();
     let all = memory.profiles().unwrap();

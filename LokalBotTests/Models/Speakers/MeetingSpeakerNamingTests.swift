@@ -98,7 +98,7 @@ final class MeetingSpeakerNamingTests: XCTestCase {
     func testVoiceSuggestionsAndProfileIDsPropagateToChoices() {
         let profileID = UUID()
         let match = SpeakerNameMatch(
-            name: "Alper",
+            name: "Alex",
             participantReference: profileID.uuidString,
             tier: .suggested,
             source: .profile,
@@ -120,15 +120,15 @@ final class MeetingSpeakerNamingTests: XCTestCase {
         var draft = MeetingSpeakerNamingDraft(voices: lists.voices, suggestions: [])
         draft.toggle(.init(id: "voice:\(match.id)", name: match.name, profileID: profileID), for: "them 2")
         XCTAssertEqual(draft.choices(for: ["them 2"]), [
-            .init(speaker: "them 2", name: "Alper", profileID: profileID),
+            .init(speaker: "them 2", name: "Alex", profileID: profileID),
         ])
 
         draft.typeName(for: "them 3")
-        draft.typedNames["them 3"] = "Alper"
+        draft.typedNames["them 3"] = "Alex"
         draft.typedProfileIDs["them 3"] = profileID
         XCTAssertEqual(draft.choices(for: ["them 2", "them 3"]), [
-            .init(speaker: "them 2", name: "Alper", profileID: profileID),
-            .init(speaker: "them 3", name: "Alper", profileID: profileID),
+            .init(speaker: "them 2", name: "Alex", profileID: profileID),
+            .init(speaker: "them 3", name: "Alex", profileID: profileID),
         ])
     }
 }

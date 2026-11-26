@@ -182,10 +182,10 @@ mod tests {
             Some("ayse@corp.local")
         );
 
-        let single = r#"{"displayName":"Alper Torun","objectGuid":"abcd","distinguishedName":null,"userPrincipalName":"alper@corp.local"}"#;
+        let single = r#"{"displayName":"Jane Doe","objectGuid":"abcd","distinguishedName":null,"userPrincipalName":"jane.doe@example.local"}"#;
         let parsed_single = parse_ad_search_json(single);
         assert_eq!(parsed_single.len(), 1);
-        assert_eq!(parsed_single[0].display_name, "Alper Torun");
+        assert_eq!(parsed_single[0].display_name, "Jane Doe");
 
         assert!(parse_ad_search_json("").is_empty());
         assert!(parse_ad_search_json("not json").is_empty());

@@ -37,9 +37,9 @@ Follow this workflow whenever the user asks to sync with `upstream` (`stevyhacke
      ```bash
      git checkout -B master upstream/master
      # cherry-pick remaining active feature commits in stack order
-     # cherry-pick the fork-meta commit (or update FORK_PATCHES.md & commit with fh git antigravity-alper)
+     # cherry-pick the fork-meta commit (or update FORK_PATCHES.md & commit with repo-local identity `blx10 <19878591+blx10@users.noreply.github.com>`)
      ```
-   - Update `FORK_PATCHES.md` so **Active on `master`**, **Open Upstream PRs**, and **Dropped** reflect the new state. Commit fork-meta updates using `/Users/alpertorun/Documents/Frontier-Harness/fh git antigravity-alper commit -m "..."`.
+   - Update `FORK_PATCHES.md` so **Active on `master`**, **Open Upstream PRs**, and **Dropped** reflect the new state. Commit fork-meta updates using the repo-local GitHub noreply identity (`blx10 <19878591+blx10@users.noreply.github.com>`).
 
 4. **Verify & push**:
    - Run relevant test suites (`cargo test` in `LinuxWindows/` and/or macOS non-UI `xcodebuild test` if macOS code changed).
