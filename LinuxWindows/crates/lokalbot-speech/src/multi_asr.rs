@@ -325,7 +325,7 @@ impl MultiSttRunner {
 
     fn execute_passes(
         &self,
-        prepared: PreparedMeeting,
+        mut prepared: PreparedMeeting,
         mic: Option<&Path>,
         system: Option<&Path>,
         language: Option<&str>,
@@ -343,6 +343,7 @@ impl MultiSttRunner {
                 ..Default::default()
             });
         }
+        prepared.pieces = coalesce_pieces(prepared.pieces, 2.0, MULTI_STT_MAX_SPAN_SECONDS);
 
         let (primary_texts, primary_telemetry) =
             self.run_pass("primary", &self.config.primary, 1, 3, &prepared.pieces, language, progress)?;
@@ -526,6 +527,13 @@ impl MultiSttRunner {
         }
         drop(decoder);
         let elapsed_ms = started.elapsed().as_millis() as u64;
+        log::info!(
+            "speech: multi-stt pass {pass}/{total_passes} role={role} model={} device={:?} fallback={} segments={} elapsed_ms={elapsed_ms}",
+            slot.id,
+            provenance.actual_device,
+            provenance.fallback_occurred,
+            pieces.len(),
+        );
         Ok((
             texts,
             ModelPassTelemetry {
@@ -537,6 +545,42 @@ impl MultiSttRunner {
             },
         ))
     }
+}
+
+fn coalesce_pieces(
+    pieces: Vec<crate::transcriber::PreparedPiece>,
+    max_gap: f64,
+    max_span: f64,
+) -> Vec<crate::transcriber::PreparedPiece> {
+    let mut out: Vec<crate::transcriber::PreparedPiece> = Vec::with_capacity(pieces.len());
+    for piece in pieces {
+        let can_merge = out.last().is_some_and(|prev| {
+            let gap = piece.start - prev.end;
+            let combined = piece.end - prev.start;
+            prev.source == piece.source
+                && prev.speaker == piece.speaker
+                && prev.attribution == piece.attribution
+                && gap >= -0.05
+                && gap <= max_gap
+                && combined <= max_span
+        });
+        if can_merge {
+            let prev = out.last_mut().expect("checked above");
+            let gap = (piece.start - prev.end).max(0.0);
+            let pad = (gap * crate::vad::SAMPLE_RATE as f64).round() as usize;
+            if pad > 0 {
+                prev.samples.extend(std::iter::repeat_n(0.0f32, pad));
+            }
+            prev.samples.extend_from_slice(&piece.samples);
+            prev.end = prev.end.max(piece.end);
+            if prev.precision != piece.precision {
+                prev.precision = TimingPrecision::Span;
+            }
+        } else {
+            out.push(piece);
+        }
+    }
+    out
 }
 
 fn normalized_language(language: Option<&str>) -> Option<&str> {
@@ -796,5 +840,44 @@ mod tests {
                 .transcribe_samples_multi(&audio, &TranscribeOptions::default(), &mut |_| {})
                 .is_err()
         );
+    }
+
+    #[test]
+    fn coalesce_pieces_merges_close_same_speaker_and_respects_boundaries() {
+        use crate::transcriber::PreparedPiece;
+        use lokalbot_core::{
+            AttributionMethod, AttributionSource, SpeakerAttribution, SpeakerIdentity,
+        };
+
+        let make = |source, speaker: &str, start: f64, end: f64| PreparedPiece {
+            source,
+            start,
+            end,
+            speaker: speaker.to_string(),
+            attribution: SpeakerAttribution {
+                source,
+                identity: SpeakerIdentity::Other,
+                method: AttributionMethod::Track,
+            },
+            precision: TimingPrecision::Span,
+            samples: vec![0.1; ((end - start) * 16_000.0) as usize],
+        };
+
+        let pieces = vec![
+            make(AttributionSource::Microphone, "You", 0.0, 2.0),
+            make(AttributionSource::Microphone, "You", 3.0, 5.0),
+            make(AttributionSource::System, "Speaker 1", 5.5, 8.0),
+            make(AttributionSource::System, "Speaker 1", 11.0, 14.0),
+            make(AttributionSource::System, "Speaker 1", 15.0, 35.0),
+        ];
+        let merged = coalesce_pieces(pieces, 2.0, 28.0);
+        assert_eq!(merged.len(), 3);
+        assert_eq!(merged[0].start, 0.0);
+        assert_eq!(merged[0].end, 5.0);
+        assert_eq!(merged[0].samples.len(), 5 * 16_000);
+        assert_eq!(merged[1].start, 5.5);
+        assert_eq!(merged[1].end, 8.0);
+        assert_eq!(merged[2].start, 11.0);
+        assert_eq!(merged[2].end, 35.0);
     }
 }

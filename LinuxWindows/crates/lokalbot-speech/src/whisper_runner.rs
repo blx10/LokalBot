@@ -449,7 +449,7 @@ fn spawn_and_wait(
         .arg("-l")
         .arg(language.unwrap_or("auto"))
         .arg("-bs")
-        .arg("5")
+        .arg("1")
         .arg("-mc")
         .arg("0")
         .arg("-nth")
