@@ -244,24 +244,53 @@ impl SettingsPage {
                 cx,
             ));
         }
-        for metric in snapshot.generations.iter().take(5) {
+        for metric in &snapshot.generations {
             column = column.child(generation_row(
                 metric.label.clone().into(),
                 generation_summary(metric),
                 cx,
             ));
         }
+        if snapshot.active_runs.is_empty() && snapshot.completed_runs.is_empty() {
+            column = column.child(generation_row(
+                lokalbot_i18n::tr("Session jobs").into(),
+                lokalbot_i18n::tr("None yet").to_string(),
+                cx,
+            ));
+        }
         for run in &snapshot.active_runs {
             let timing = match &run.detail {
                 Some(detail) if !detail.is_empty() => format!(
-                    "Started {} · {} · {}",
+                    "Running · {} · {} · {}",
                     run.started_at.format("%H:%M:%S"),
                     lokalbot_core::time::timer(run.elapsed_seconds),
                     detail
                 ),
                 _ => format!(
-                    "Started {} · {}",
+                    "Running · {} · {}",
                     run.started_at.format("%H:%M:%S"),
+                    lokalbot_core::time::timer(run.elapsed_seconds),
+                ),
+            };
+            column = column.child(generation_row(
+                format!("{} · {}", run.kind, run.model).into(),
+                timing,
+                cx,
+            ));
+        }
+        for run in &snapshot.completed_runs {
+            let timing = match &run.detail {
+                Some(detail) if !detail.is_empty() => format!(
+                    "{} → {} · {} · {}",
+                    run.started_at.format("%H:%M:%S"),
+                    run.finished_at.format("%H:%M:%S"),
+                    lokalbot_core::time::timer(run.elapsed_seconds),
+                    detail
+                ),
+                _ => format!(
+                    "{} → {} · {}",
+                    run.started_at.format("%H:%M:%S"),
+                    run.finished_at.format("%H:%M:%S"),
                     lokalbot_core::time::timer(run.elapsed_seconds),
                 ),
             };
