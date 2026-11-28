@@ -1,3 +1,6 @@
+use std::time::Duration;
+
+use crate::bridge::EngineHandle;
 use crate::i18n::h_flex;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::popover::Popover;
@@ -29,6 +32,9 @@ pub struct Workspace {
     projects: Entity<ProjectsPage>,
     ask: Entity<AskPage>,
     agent: Entity<AgentPage>,
+    metrics_sampler: lokalbot_engine::ResourceSampler,
+    metrics_snapshot: Option<lokalbot_engine::ResourceSnapshot>,
+    metrics_polling: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -51,8 +57,52 @@ impl Workspace {
             ask: cx.new(|cx| AskPage::new(window, cx)),
             agent: cx.new(|cx| AgentPage::new(window, cx)),
             data,
+            metrics_sampler: lokalbot_engine::ResourceSampler::default(),
+            metrics_snapshot: None,
+            metrics_polling: false,
             _subscriptions: subscriptions,
         }
+    }
+
+    fn sample_metrics(&mut self, cx: &mut Context<Self>) {
+        let Some(engine) = cx.try_global::<EngineHandle>().map(|e| e.0.clone()) else {
+            return;
+        };
+        self.metrics_snapshot = Some(self.metrics_sampler.sample(&engine));
+    }
+
+    fn ensure_metrics_polling(&mut self, cx: &mut Context<Self>) {
+        if !self.data.read(cx).settings.show_model_metrics {
+            self.metrics_snapshot = None;
+            return;
+        }
+        if self.metrics_polling {
+            return;
+        }
+        self.metrics_polling = true;
+        self.sample_metrics(cx);
+        cx.spawn(async move |workspace, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_secs(2)).await;
+                let keep_going = workspace
+                    .update(cx, |workspace, cx| {
+                        let enabled = workspace.data.read(cx).settings.show_model_metrics;
+                        if enabled {
+                            workspace.sample_metrics(cx);
+                            cx.notify();
+                        } else {
+                            workspace.metrics_polling = false;
+                            workspace.metrics_snapshot = None;
+                        }
+                        enabled
+                    })
+                    .unwrap_or(false);
+                if !keep_going {
+                    return;
+                }
+            }
+        })
+        .detach();
     }
 
     fn page_parts(
@@ -212,6 +262,11 @@ impl Workspace {
             .settings
             .companion_sharing_enabled
             .then(|| companion_line(data.companion.devices.len()));
+        let metrics_card = data
+            .settings
+            .show_model_metrics
+            .then(|| self.metrics_snapshot.clone().unwrap_or_default());
+        let metrics_data = self.data.clone();
         let data_entity = self.data.clone();
         let settings_data = self.data.clone();
 
@@ -327,6 +382,9 @@ impl Workspace {
                             )
                         }),
                 )
+            })
+            .when_some(metrics_card, |this, snapshot| {
+                this.child(model_metrics_card(&snapshot, &metrics_data, cx))
             })
             .child(
                 v_flex()
@@ -555,6 +613,7 @@ pub fn toast(data: &Entity<AppData>, cx: &App) -> Option<AnyElement> {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.ensure_metrics_polling(cx);
         let section = self.data.read(cx).section;
         let parts = self.page_parts(section, window, cx);
         let lb = cx.lb().clone();
@@ -581,6 +640,140 @@ impl Render for Workspace {
                     .child(div().flex_1().min_h_0().relative().child(parts.page))
                     .children(toast),
             )
+    }
+}
+
+fn model_metrics_card(
+    snapshot: &lokalbot_engine::ResourceSnapshot,
+    data: &Entity<AppData>,
+    cx: &App,
+) -> AnyElement {
+    let lb = cx.lb();
+    let data = data.clone();
+    let cpu_ram = match (snapshot.cpu_percent, snapshot.memory_bytes) {
+        (Some(cpu), Some(mem)) => format!("CPU {cpu:.0}% · {}", format_bytes(mem)),
+        (Some(cpu), None) => format!("CPU {cpu:.0}%"),
+        (None, Some(mem)) => format_bytes(mem),
+        (None, None) => String::new(),
+    };
+    let mut card = ui::grouped_surface(cx)
+        .id("sidebar-model-metrics")
+        .cursor_pointer()
+        .p(px(10.))
+        .gap(px(4.))
+        .on_click(move |_, _, cx| {
+            data.update(cx, |data, cx| {
+                data.open_settings(crate::state::SettingsCategory::Advanced, cx)
+            })
+        })
+        .child(
+            h_flex()
+                .gap(px(6.))
+                .items_center()
+                .child(
+                    div()
+                        .text_size(ty::SMALL)
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(lb.text)
+                        .child(lokalbot_i18n::tr("Model metrics")),
+                )
+                .child(div().flex_1())
+                .when(!cpu_ram.is_empty(), |this| {
+                    this.child(
+                        div()
+                            .text_size(ty::SMALL)
+                            .text_color(lb.text_secondary)
+                            .child(cpu_ram),
+                    )
+                }),
+        );
+
+    if !snapshot.active_runs.is_empty() {
+        for run in snapshot.active_runs.iter().take(2) {
+            let started = run.started_at.format("%H:%M:%S");
+            let elapsed = lokalbot_core::time::timer(run.elapsed_seconds);
+            let subline = match &run.detail {
+                Some(detail) if !detail.is_empty() => {
+                    format!("{started} · {elapsed} · {detail}")
+                }
+                _ => format!("{started} · {elapsed}"),
+            };
+            card = card
+                .child(
+                    h_flex()
+                        .gap(px(6.))
+                        .items_center()
+                        .child(ui::status_dot(lb.accent_text, px(6.)))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(ty::SMALL)
+                                .font_weight(FontWeight::MEDIUM)
+                                .text_color(lb.text)
+                                .child(format!("{}: {}", run.kind, run.model)),
+                        ),
+                )
+                .child(
+                    div()
+                        .truncate()
+                        .text_size(ty::SMALL)
+                        .text_color(lb.text_secondary)
+                        .child(subline),
+                );
+        }
+    } else if !snapshot.models.is_empty() {
+        let names = snapshot
+            .models
+            .iter()
+            .map(|m| m.label.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let any_in_use = snapshot.models.iter().any(|m| m.in_use);
+        card = card.child(
+            div()
+                .truncate()
+                .text_size(ty::SMALL)
+                .text_color(lb.text_secondary)
+                .child(format!(
+                    "{names} · {}",
+                    if any_in_use { "in use" } else { "idle" }
+                )),
+        );
+    } else {
+        card = card.child(
+            div()
+                .text_size(ty::SMALL)
+                .text_color(lb.text_secondary)
+                .child(lokalbot_i18n::tr("No model running")),
+        );
+    }
+
+    if let Some(metric) = snapshot.generations.first() {
+        card = card.child(
+            div()
+                .truncate()
+                .text_size(ty::SMALL)
+                .text_color(lb.text_secondary)
+                .child(format!(
+                    "{} · {:.1} tok/s · ~{} tok · {}",
+                    metric.label,
+                    metric.tokens_per_second(),
+                    metric.approx_tokens,
+                    metric.started_at.format("%H:%M:%S"),
+                )),
+        );
+    }
+
+    card.into_any_element()
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes >= 1_073_741_824 {
+        format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)
+    } else {
+        format!("{:.0} MB", bytes as f64 / 1_048_576.0)
     }
 }
 

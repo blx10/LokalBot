@@ -44,7 +44,8 @@ fn memory(bytes: Option<u64>) -> String {
 
 fn generation_summary(metric: &GenerationMetric) -> String {
     format!(
-        "{:.1}s · ~{} tok · {:.0} tok/s",
+        "{} · {:.1}s · ~{} tok · {:.0} tok/s",
+        metric.started_at.format("%H:%M:%S"),
         metric.seconds,
         metric.approx_tokens,
         metric.tokens_per_second()
@@ -250,16 +251,49 @@ impl SettingsPage {
                 cx,
             ));
         }
-        Section::new(lokalbot_i18n::tr("Resource Monitor")).row(
-            "settings.resourceMonitor",
-            settings_row::content_row(
-                "settings.resourceMonitor",
-                column,
-                self.is_focused("settings.resourceMonitor"),
+        for run in &snapshot.active_runs {
+            let timing = match &run.detail {
+                Some(detail) if !detail.is_empty() => format!(
+                    "Started {} · {} · {}",
+                    run.started_at.format("%H:%M:%S"),
+                    lokalbot_core::time::timer(run.elapsed_seconds),
+                    detail
+                ),
+                _ => format!(
+                    "Started {} · {}",
+                    run.started_at.format("%H:%M:%S"),
+                    lokalbot_core::time::timer(run.elapsed_seconds),
+                ),
+            };
+            column = column.child(generation_row(
+                format!("{} · {}", run.kind, run.model).into(),
+                timing,
                 cx,
+            ));
+        }
+        let show_metrics = self.data.read(cx).settings.show_model_metrics;
+        let metrics_toggle = self.toggle(
+            "settings.showModelMetrics",
+            lokalbot_i18n::tr("Show live model metrics in sidebar"),
+            Some(lokalbot_i18n::tr(
+                "Display the active model, start time, elapsed time, and token/s speed in the sidebar.",
+            )),
+            show_metrics,
+            |s, v| s.show_model_metrics = v,
+            cx,
+        );
+        Section::new(lokalbot_i18n::tr("Resource Monitor"))
+            .row("settings.showModelMetrics", metrics_toggle)
+            .row(
+                "settings.resourceMonitor",
+                settings_row::content_row(
+                    "settings.resourceMonitor",
+                    column,
+                    self.is_focused("settings.resourceMonitor"),
+                    cx,
+                )
+                .into_any_element(),
             )
-            .into_any_element(),
-        )
     }
 }
 
@@ -285,8 +319,9 @@ mod tests {
             label: "Summary · Qwen3.5 4B".into(),
             seconds: 12.34,
             approx_tokens: 480,
+            started_at: chrono::Local::now(),
         };
-        assert_eq!(generation_summary(&metric), "12.3s · ~480 tok · 39 tok/s");
+        assert!(generation_summary(&metric).ends_with("12.3s · ~480 tok · 39 tok/s"));
     }
 
     #[test]
