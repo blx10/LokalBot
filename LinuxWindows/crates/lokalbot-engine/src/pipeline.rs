@@ -522,6 +522,25 @@ impl Inner {
             };
             self.stage(&meeting, Stage::Transcribing, "Transcribing", None);
             let (transcript, multi_segments) = if let Some(multi_cfg) = multi_stt_cfg.as_ref() {
+                let pass_device = |pass: usize| match pass {
+                    1 => match multi_cfg.primary.device {
+                        crate::speech::ExecutionDevice::IGpu => "iGPU",
+                        crate::speech::ExecutionDevice::Cpu => "CPU",
+                    },
+                    2 => match multi_cfg.tr_backup.device {
+                        crate::speech::ExecutionDevice::IGpu => "iGPU",
+                        crate::speech::ExecutionDevice::Cpu => "CPU",
+                    },
+                    _ => match multi_cfg.fast_helper.device {
+                        crate::speech::ExecutionDevice::IGpu => "iGPU",
+                        crate::speech::ExecutionDevice::Cpu => "CPU",
+                    },
+                };
+                let stt_run = self.shared.begin_model_run(
+                    "STT",
+                    multi_cfg.primary.id.clone(),
+                    Some("Detecting speech".into()),
+                );
                 let (transcript, multi_result) = transcribe_meeting_multi_stt(
                     &self.shared,
                     &meeting,
@@ -530,27 +549,50 @@ impl Inner {
                     audio.system.as_deref(),
                     &options,
                     &mut |progress| match progress {
-                        lokalbot_speech::MultiSttProgress::DetectingSpeech => self.stage(
-                            &meeting,
-                            Stage::PreparingModel("speech detection".into()),
-                            "Preparing transcription model",
-                            None,
-                        ),
-                        lokalbot_speech::MultiSttProgress::IdentifyingSpeakers => self.stage(
-                            &meeting,
-                            Stage::IdentifyingSpeakers,
-                            "Separating speakers",
-                            None,
-                        ),
-                        lokalbot_speech::MultiSttProgress::LoadingModel { model_id, .. } => self
-                            .stage(
+                        lokalbot_speech::MultiSttProgress::DetectingSpeech => {
+                            stt_run.update("VAD", Some("Detecting speech".into()));
+                            self.stage(
+                                &meeting,
+                                Stage::PreparingModel("speech detection".into()),
+                                "Preparing transcription model",
+                                None,
+                            )
+                        }
+                        lokalbot_speech::MultiSttProgress::IdentifyingSpeakers => {
+                            stt_run.update("Diarization", Some("Separating speakers".into()));
+                            self.stage(
+                                &meeting,
+                                Stage::IdentifyingSpeakers,
+                                "Separating speakers",
+                                None,
+                            )
+                        }
+                        lokalbot_speech::MultiSttProgress::LoadingModel {
+                            model_id,
+                            pass,
+                            total_passes,
+                        } => {
+                            let label = format!("{model_id} ({})", pass_device(pass));
+                            stt_run.update(label, Some(format!("Pass {pass}/{total_passes} · loading")));
+                            self.stage(
                                 &meeting,
                                 Stage::PreparingModel(model_id),
                                 "Preparing transcription model",
                                 None,
-                            ),
-                        lokalbot_speech::MultiSttProgress::Transcribing { fraction, .. } => {
+                            )
+                        }
+                        lokalbot_speech::MultiSttProgress::Transcribing {
+                            model_id,
+                            pass,
+                            total_passes,
+                            fraction,
+                        } => {
                             self.shared.speech.stand_aside();
+                            let label = format!("{model_id} ({})", pass_device(pass));
+                            stt_run.update(
+                                label,
+                                Some(format!("Pass {pass}/{total_passes} · {:.0}%", fraction * 100.0)),
+                            );
                             self.stage(
                                 &meeting,
                                 Stage::Transcribing,
@@ -560,6 +602,7 @@ impl Inner {
                         }
                     },
                 )?;
+                drop(stt_run);
                 (transcript, Some(multi_result.segments))
             } else {
                 let stt_run = self.shared.begin_model_run(
@@ -813,7 +856,20 @@ impl Inner {
             }
             _ => crate::post_correction::segments_from_transcript(&transcript),
         };
-        let (corrected, _) = crate::post_correction::correct_transcript_with_runtime(
+        let started = std::time::Instant::now();
+        let judge = if settings.post_correction_primary_judge_model.trim().is_empty() {
+            "Post-correction".to_string()
+        } else {
+            settings.post_correction_primary_judge_model.clone()
+        };
+        let pc_run = settings.post_correction_enabled.then(|| {
+            self.shared.begin_model_run(
+                "Post-correction",
+                judge.clone(),
+                Some("Refining transcript".into()),
+            )
+        });
+        let (corrected, outcome) = crate::post_correction::correct_transcript_with_runtime(
             meeting,
             &self.shared.library,
             settings,
@@ -824,6 +880,20 @@ impl Inner {
                 self.stage(meeting, Stage::PostCorrecting, "Refining transcript", None);
             },
         )?;
+        drop(pc_run);
+        if outcome.is_some() {
+            let joined = corrected
+                .segments
+                .iter()
+                .map(|s| s.text.as_str())
+                .collect::<Vec<_>>()
+                .join(" ");
+            self.shared.generation_metrics.record(
+                format!("Post-correction · {judge}"),
+                started.elapsed().as_secs_f64(),
+                &joined,
+            );
+        }
         Ok(corrected)
     }
 }
