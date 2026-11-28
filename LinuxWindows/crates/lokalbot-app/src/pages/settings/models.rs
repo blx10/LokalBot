@@ -995,7 +995,7 @@ impl SettingsPage {
                             let already = *checked;
                             let needs_download = shows_download_mark(
                                 already,
-                                downloadable_model_id(patch),
+                                downloadable_model_id(&patch),
                                 &installed,
                             );
                             menu = menu.item(

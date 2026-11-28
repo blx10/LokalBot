@@ -536,6 +536,7 @@ impl Onboarding {
             let id = match preset {
                 Preset::Balanced => "onboarding-preset-recommended",
                 Preset::Lightweight => "onboarding-preset-lightweight",
+                Preset::AsymmetricMultiStt => "onboarding-preset-asymmetric-multi-stt",
             };
             div()
                 .id(id)
@@ -1177,6 +1178,7 @@ fn apply_preset(settings: &mut Settings, preset: Preset) {
     let catalog = match preset {
         Preset::Balanced => &lokalbot_ai::catalog::PRESETS[0],
         Preset::Lightweight => &lokalbot_ai::catalog::PRESETS[1],
+        Preset::AsymmetricMultiStt => &lokalbot_ai::catalog::PRESETS[0],
     };
     let (speech, _) = preset.models();
     settings.summarizer_backend = SummarizerBackend::BuiltIn;
@@ -1217,6 +1219,7 @@ fn preset_option_label(preset: Preset, bytes: u64) -> String {
     let base = match preset {
         Preset::Balanced => lokalbot_i18n::tr("Recommended"),
         Preset::Lightweight => lokalbot_i18n::tr("Lightweight"),
+        Preset::AsymmetricMultiStt => "Asymmetric Multi-STT",
     };
     if bytes > 0 {
         format!("{base} (~{})", size_label(bytes))

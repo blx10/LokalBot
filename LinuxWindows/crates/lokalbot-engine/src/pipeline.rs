@@ -881,7 +881,7 @@ impl Inner {
             },
         )?;
         drop(pc_run);
-        if outcome.is_some() {
+        if outcome {
             let joined = corrected
                 .segments
                 .iter()
