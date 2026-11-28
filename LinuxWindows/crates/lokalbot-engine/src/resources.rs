@@ -26,6 +26,18 @@ pub struct ActiveModelRun {
     pub elapsed_seconds: f64,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct CompletedModelRun {
+    pub kind: String,
+    pub model: String,
+    pub detail: Option<String>,
+    pub started_at: DateTime<Local>,
+    pub finished_at: DateTime<Local>,
+    pub elapsed_seconds: f64,
+}
+
+const MAXIMUM_RUN_HISTORY: usize = 200;
+
 struct ActiveEntry {
     id: u64,
     kind: String,
@@ -39,6 +51,7 @@ struct ActiveEntry {
 pub struct ActiveModels {
     next_id: AtomicU64,
     entries: Mutex<Vec<ActiveEntry>>,
+    history: Mutex<VecDeque<CompletedModelRun>>,
 }
 
 impl ActiveModels {
@@ -79,7 +92,29 @@ impl ActiveModels {
     }
 
     pub fn finish(&self, id: u64) {
-        self.entries.lock().retain(|e| e.id != id);
+        let removed = {
+            let mut entries = self.entries.lock();
+            entries
+                .iter()
+                .position(|e| e.id == id)
+                .map(|idx| entries.remove(idx))
+        };
+        if let Some(entry) = removed {
+            let mut history = self.history.lock();
+            history.push_front(CompletedModelRun {
+                kind: entry.kind,
+                model: entry.model,
+                detail: entry.detail,
+                started_at: entry.started_at,
+                finished_at: Local::now(),
+                elapsed_seconds: entry.started_instant.elapsed().as_secs_f64(),
+            });
+            history.truncate(MAXIMUM_RUN_HISTORY);
+        }
+    }
+
+    pub fn completed(&self) -> Vec<CompletedModelRun> {
+        self.history.lock().iter().cloned().collect()
     }
 
     pub fn snapshot(&self) -> Vec<ActiveModelRun> {
@@ -135,6 +170,7 @@ pub struct ResourceSnapshot {
     pub memory_bytes: Option<u64>,
     pub models: Vec<LoadedModel>,
     pub active_runs: Vec<ActiveModelRun>,
+    pub completed_runs: Vec<CompletedModelRun>,
     pub generations: Vec<GenerationMetric>,
 }
 
@@ -265,6 +301,7 @@ impl ResourceSampler {
             memory_bytes: memory,
             models,
             active_runs: engine.active_models(),
+            completed_runs: engine.completed_models(),
             generations: engine.recent_generations(),
         }
     }
@@ -318,6 +355,18 @@ mod tests {
         assert_eq!(updated[0].detail.as_deref(), Some("50%"));
         tracker.finish(id);
         assert!(tracker.snapshot().is_empty());
+        let completed = tracker.completed();
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0].kind, "STT");
+        assert_eq!(completed[0].model, "whisper-turbo-tr");
+        assert_eq!(completed[0].detail.as_deref(), Some("50%"));
+        assert!(completed[0].elapsed_seconds >= 0.0);
+        let id2 = tracker.start("Summary", "Qwen3.5", None);
+        tracker.finish(id2);
+        let completed2 = tracker.completed();
+        assert_eq!(completed2.len(), 2);
+        assert_eq!(completed2[0].kind, "Summary");
+        assert_eq!(completed2[1].kind, "STT");
     }
 
     #[test]

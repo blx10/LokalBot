@@ -60,7 +60,8 @@ pub use companion::{
 pub use events::*;
 pub use recording::recover_unfinished_recordings;
 pub use resources::{
-    ActiveModelRun, GenerationMetric, LoadedModel, ResourceSampler, ResourceSnapshot,
+    ActiveModelRun, CompletedModelRun, GenerationMetric, LoadedModel, ResourceSampler,
+    ResourceSnapshot,
 };
 pub use selection::{SelectionPhase, SelectionView};
 pub use speak::EXPORT_KEY as SPEECH_EXPORT_KEY;
@@ -375,6 +376,10 @@ impl Engine {
 
     pub fn active_models(&self) -> Vec<ActiveModelRun> {
         self.shared.active_models.snapshot()
+    }
+
+    pub fn completed_models(&self) -> Vec<CompletedModelRun> {
+        self.shared.active_models.completed()
     }
 }
 
