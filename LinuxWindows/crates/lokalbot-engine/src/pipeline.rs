@@ -645,13 +645,25 @@ impl Inner {
                     None,
                 )
             };
-            let transcript = self.post_correct_transcript(
+            library.save_new_transcript(&meeting, &transcript)?;
+            let transcript = match self.post_correct_transcript(
                 &meeting,
                 &settings,
-                transcript,
+                transcript.clone(),
                 multi_segments.as_deref(),
-            )?;
-            library.save_new_transcript(&meeting, &transcript)?;
+            ) {
+                Ok(refined) => {
+                    library.save_new_transcript(&meeting, &refined)?;
+                    refined
+                }
+                Err(err) => {
+                    log::warn!(
+                        "post-correction failed for {}; keeping raw transcript: {err:#}",
+                        meeting.id
+                    );
+                    transcript
+                }
+            };
             library.mark_transcription_completed(meeting.id)?;
             library.reindex_meeting(&meeting)?;
             self.shared.emit(EngineEvent::LibraryChanged);

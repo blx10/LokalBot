@@ -91,7 +91,7 @@ impl Default for PostCorrectionConfig {
             base_url: String::new(),
             api_key: String::new(),
             primary_judge_model: "Qwen3.8-27B".into(),
-            support_critic_models: vec!["gemma-4-31B-it".into(), "gpt-oss-120b".into()],
+            support_critic_models: vec!["gemma-4-31B-it".into()],
             segments_per_batch: 5,
             request_timeout_sec: 120,
             max_concurrent_batches: 2,

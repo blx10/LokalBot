@@ -313,10 +313,7 @@ impl Default for Settings {
             post_correction_enabled: false,
             post_correction_base_url: String::new(),
             post_correction_primary_judge_model: "Qwen3.8-27B".into(),
-            post_correction_support_critic_models: vec![
-                "gemma-4-31B-it".into(),
-                "gpt-oss-120b".into(),
-            ],
+            post_correction_support_critic_models: vec!["gemma-4-31B-it".into()],
             post_correction_segments_per_batch: 5,
             post_correction_request_timeout_sec: 120,
             post_correction_max_concurrent_batches: 2,

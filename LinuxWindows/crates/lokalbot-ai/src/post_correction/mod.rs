@@ -1,7 +1,7 @@
 pub mod critic;
 pub mod judge;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -57,7 +57,7 @@ impl Default for PostCorrectionConfig {
             base_url: String::new(),
             api_key: String::new(),
             primary_judge_model: "Qwen3.8-27B".into(),
-            support_critic_models: vec!["gemma-4-31B-it".into(), "gpt-oss-120b".into()],
+            support_critic_models: vec!["gemma-4-31B-it".into()],
             segments_per_batch: 5,
             request_timeout_sec: 120,
             max_concurrent_batches: 2,
@@ -419,6 +419,7 @@ impl PostCorrector {
         let results: Mutex<Vec<Option<Result<BatchOutput>>>> =
             Mutex::new((0..batch_count).map(|_| None).collect());
         let cursor = Mutex::new(0usize);
+        let critic_failures: Mutex<HashMap<String, usize>> = Mutex::new(HashMap::new());
         let aborted = AtomicBool::new(false);
         let workers = self.config.effective_concurrency().min(batch_count);
 
@@ -439,7 +440,8 @@ impl PostCorrector {
                             current
                         };
                         let (start, end) = ranges[idx];
-                        let outcome = self.process_batch(segments, start, end);
+                        let outcome =
+                            self.process_batch(segments, start, end, &critic_failures);
                         if outcome.is_err() {
                             aborted.store(true, Ordering::Release);
                         }
@@ -487,11 +489,14 @@ impl PostCorrector {
         })
     }
 
+const CRITIC_MAX_FAILURES: usize = 3;
+
     fn process_batch(
         &self,
         all: &[MultiSttSegment],
         start: usize,
         end: usize,
+        critic_failures: &Mutex<HashMap<String, usize>>,
     ) -> Result<BatchOutput> {
         let batch = &all[start..end];
         let prev_start = start.saturating_sub(2);
@@ -499,13 +504,19 @@ impl PostCorrector {
         let next_end = (end + 2).min(all.len());
         let next_context = &all[end..next_end];
 
-        let critic_models: Vec<String> = self
-            .config
-            .support_critic_models
-            .iter()
-            .map(|m| m.trim().to_string())
-            .filter(|m| !m.is_empty())
-            .collect();
+        let critic_models: Vec<String> = {
+            let failures = critic_failures.lock();
+            self.config
+                .support_critic_models
+                .iter()
+                .map(|m| m.trim().to_string())
+                .filter(|m| {
+                    !m.is_empty()
+                        && (!self.config.continue_on_critic_failure
+                            || failures.get(m).copied().unwrap_or(0) < Self::CRITIC_MAX_FAILURES)
+                })
+                .collect()
+        };
 
         let critic_results: Vec<CriticModelResult> = if critic_models.len() <= 1 {
             critic_models
@@ -536,8 +547,22 @@ impl PostCorrector {
                 if !self.config.continue_on_critic_failure {
                     return Err(anyhow::anyhow!(msg));
                 }
+                let count = {
+                    let mut failures = critic_failures.lock();
+                    let entry = failures.entry(critic_res.model.clone()).or_insert(0);
+                    *entry += 1;
+                    *entry
+                };
                 log::warn!("{msg}");
                 warnings.push(msg);
+                if count == Self::CRITIC_MAX_FAILURES {
+                    let skip_msg = format!(
+                        "critic {} failed {} times; skipping it for remaining batches",
+                        critic_res.model, Self::CRITIC_MAX_FAILURES
+                    );
+                    log::warn!("{skip_msg}");
+                    warnings.push(skip_msg);
+                }
             }
         }
 
@@ -646,7 +671,7 @@ mod tests {
             base_url: url,
             api_key: "sk-test-secret-key-987".into(),
             primary_judge_model: "Qwen3.8-27B".into(),
-            support_critic_models: vec!["gemma-4-31B-it".into(), "gpt-oss-120b".into()],
+            support_critic_models: vec!["gemma-4-31B-it".into()],
             segments_per_batch: 5,
             request_timeout_sec: 10,
             max_concurrent_batches: 2,
@@ -694,7 +719,8 @@ mod tests {
             },
         ];
 
-        let cfg = config_for(server.url("/v1"));
+        let mut cfg = config_for(server.url("/v1"));
+        cfg.support_critic_models = vec!["gemma-4-31B-it".into(), "gpt-oss-120b".into()];
         assert!(!format!("{cfg:?}").contains("sk-test-secret-key-987"));
 
         let corrector = PostCorrector::new(cfg, Vec::new())
@@ -902,6 +928,7 @@ mod tests {
 
         let segs = sample_segments(1);
         let mut cfg = config_for(server.url("/v1"));
+        cfg.support_critic_models = vec!["gemma-4-31B-it".into(), "gpt-oss-120b".into()];
         cfg.continue_on_critic_failure = true;
         let out = PostCorrector::new(cfg.clone(), Vec::new())
             .unwrap()
@@ -1156,5 +1183,50 @@ mod tests {
         cfg.support_critic_models.push("gpt-oss-120b".into());
         assert!(requires_remote_endpoint(&cfg));
         assert!(PostCorrector::new(cfg, Vec::new()).is_err());
+    }
+
+    #[test]
+    fn critic_is_skipped_after_three_failures() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let critic_calls = Arc::new(AtomicUsize::new(0));
+        let critic_calls_srv = Arc::clone(&critic_calls);
+        let server = StubServer::start(move |req| {
+            let body = req.json();
+            let model = body["model"].as_str().unwrap_or("");
+            if model == "bad-critic" {
+                critic_calls_srv.fetch_add(1, Ordering::SeqCst);
+                chat_ok("not valid json or line-diff")
+            } else {
+                let ids: Vec<serde_json::Value> = (0..5)
+                    .filter(|id| {
+                        body["messages"][1]["content"]
+                            .as_str()
+                            .unwrap_or("")
+                            .contains(&format!("[Seg {id}]"))
+                    })
+                    .map(|id| serde_json::json!({ "segment_id": id, "text": format!("ok {id}") }))
+                    .collect();
+                chat_ok(&serde_json::json!({ "segments": ids }).to_string())
+            }
+        });
+        let mut cfg = config_for(server.url("/v1"));
+        cfg.support_critic_models = vec!["bad-critic".into()];
+        cfg.continue_on_critic_failure = true;
+        cfg.segments_per_batch = 1;
+        cfg.max_concurrent_batches = 1;
+
+        let out = PostCorrector::new(cfg, Vec::new())
+            .unwrap()
+            .correct(&sample_segments(5))
+            .unwrap();
+        assert_eq!(out.texts.len(), 5);
+        assert_eq!(critic_calls.load(Ordering::SeqCst), 3);
+        assert!(
+            out.audit
+                .warnings
+                .iter()
+                .any(|w| w.contains("skipping it for remaining batches"))
+        );
     }
 }
