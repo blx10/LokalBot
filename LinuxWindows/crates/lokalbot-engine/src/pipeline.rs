@@ -562,6 +562,11 @@ impl Inner {
                 )?;
                 (transcript, Some(multi_result.segments))
             } else {
+                let stt_run = self.shared.begin_model_run(
+                    "STT",
+                    settings.transcription_model.clone(),
+                    Some("Transcribing".into()),
+                );
                 let detailed = self
                     .shared
                     .speech
@@ -578,6 +583,10 @@ impl Inner {
                                         fraction,
                                     } => {
                                         self.shared.speech.stand_aside();
+                                        stt_run.update_detail(Some(format!(
+                                            "{:.0}%",
+                                            fraction * 100.0
+                                        )));
                                         self.stage(
                                             &meeting,
                                             Stage::Transcribing,
@@ -586,6 +595,7 @@ impl Inner {
                                         )
                                     }
                                     lokalbot_speech::TranscribeProgress::IdentifyingSpeakers => {
+                                        stt_run.update_detail(Some("Separating speakers".into()));
                                         self.stage(
                                             &meeting,
                                             Stage::IdentifyingSpeakers,
@@ -599,6 +609,7 @@ impl Inner {
                         },
                     )
                     .context("transcription")?;
+                drop(stt_run);
                 let mut transcript = detailed.transcript;
                 if let Some(range) = meeting.valid_content_range() {
                     range.apply(&mut transcript);
@@ -718,6 +729,11 @@ impl Inner {
                     Vec::new()
                 },
             };
+            let summary_run = self.shared.begin_model_run(
+                "Summary",
+                think.display_name(),
+                Some("Writing notes".into()),
+            );
             let notes = lokalbot_ai::notes::generate_meeting_notes_with(
                 &think,
                 &meeting,
@@ -725,8 +741,12 @@ impl Inner {
                 &user_notes,
                 &settings,
                 &options,
-                &mut |detail: &str| self.stage(&meeting, Stage::Summarizing, detail, None),
+                &mut |detail: &str| {
+                    summary_run.update_detail(Some(detail.to_string()));
+                    self.stage(&meeting, Stage::Summarizing, detail, None)
+                },
             )?;
+            drop(summary_run);
             self.shared.generation_metrics.record(
                 format!("Summary · {}", think.display_name()),
                 started.elapsed().as_secs_f64(),

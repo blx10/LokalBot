@@ -1,6 +1,8 @@
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
+use chrono::{DateTime, Local};
 use lokalbot_ai::runtime::Role;
 use lokalbot_platform::process_usage::process_usage;
 use parking_lot::Mutex;
@@ -15,11 +17,124 @@ pub struct LoadedModel {
     pub in_use: bool,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct ActiveModelRun {
+    pub kind: String,
+    pub model: String,
+    pub detail: Option<String>,
+    pub started_at: DateTime<Local>,
+    pub elapsed_seconds: f64,
+}
+
+struct ActiveEntry {
+    id: u64,
+    kind: String,
+    model: String,
+    detail: Option<String>,
+    started_at: DateTime<Local>,
+    started_instant: Instant,
+}
+
+#[derive(Default)]
+pub struct ActiveModels {
+    next_id: AtomicU64,
+    entries: Mutex<Vec<ActiveEntry>>,
+}
+
+impl ActiveModels {
+    pub fn start(
+        &self,
+        kind: impl Into<String>,
+        model: impl Into<String>,
+        detail: Option<String>,
+    ) -> u64 {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
+        let entry = ActiveEntry {
+            id,
+            kind: kind.into(),
+            model: model.into(),
+            detail,
+            started_at: Local::now(),
+            started_instant: Instant::now(),
+        };
+        self.entries.lock().push(entry);
+        id
+    }
+
+    #[allow(dead_code)]
+    pub fn update(&self, id: u64, model: impl Into<String>, detail: Option<String>) {
+        let model = model.into();
+        let mut entries = self.entries.lock();
+        if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+            entry.model = model;
+            entry.detail = detail;
+        }
+    }
+
+    pub fn update_detail(&self, id: u64, detail: Option<String>) {
+        let mut entries = self.entries.lock();
+        if let Some(entry) = entries.iter_mut().find(|e| e.id == id) {
+            entry.detail = detail;
+        }
+    }
+
+    pub fn finish(&self, id: u64) {
+        self.entries.lock().retain(|e| e.id != id);
+    }
+
+    pub fn snapshot(&self) -> Vec<ActiveModelRun> {
+        self.entries
+            .lock()
+            .iter()
+            .map(|entry| ActiveModelRun {
+                kind: entry.kind.clone(),
+                model: entry.model.clone(),
+                detail: entry.detail.clone(),
+                started_at: entry.started_at,
+                elapsed_seconds: entry.started_instant.elapsed().as_secs_f64(),
+            })
+            .collect()
+    }
+}
+
+pub(crate) struct ModelRunGuard<'a> {
+    tracker: &'a ActiveModels,
+    id: u64,
+}
+
+impl<'a> ModelRunGuard<'a> {
+    pub(crate) fn new(
+        tracker: &'a ActiveModels,
+        kind: impl Into<String>,
+        model: impl Into<String>,
+        detail: Option<String>,
+    ) -> Self {
+        let id = tracker.start(kind, model, detail);
+        Self { tracker, id }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn update(&self, model: impl Into<String>, detail: Option<String>) {
+        self.tracker.update(self.id, model, detail);
+    }
+
+    pub(crate) fn update_detail(&self, detail: Option<String>) {
+        self.tracker.update_detail(self.id, detail);
+    }
+}
+
+impl Drop for ModelRunGuard<'_> {
+    fn drop(&mut self) {
+        self.tracker.finish(self.id);
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ResourceSnapshot {
     pub cpu_percent: Option<f64>,
     pub memory_bytes: Option<u64>,
     pub models: Vec<LoadedModel>,
+    pub active_runs: Vec<ActiveModelRun>,
     pub generations: Vec<GenerationMetric>,
 }
 
@@ -28,6 +143,7 @@ pub struct GenerationMetric {
     pub label: String,
     pub seconds: f64,
     pub approx_tokens: usize,
+    pub started_at: DateTime<Local>,
 }
 
 impl GenerationMetric {
@@ -49,11 +165,14 @@ const MAXIMUM_METRICS: usize = 20;
 
 impl GenerationMetrics {
     pub fn record(&self, label: String, seconds: f64, text: &str) {
+        let duration_ms = (seconds.max(0.0) * 1000.0).round() as i64;
+        let started_at = Local::now() - chrono::Duration::milliseconds(duration_ms);
         let mut recent = self.recent.lock();
         recent.push_front(GenerationMetric {
             label,
             seconds,
             approx_tokens: estimated_tokens(text),
+            started_at,
         });
         recent.truncate(MAXIMUM_METRICS);
     }
@@ -145,6 +264,7 @@ impl ResourceSampler {
             cpu_percent,
             memory_bytes: memory,
             models,
+            active_runs: engine.active_models(),
             generations: engine.recent_generations(),
         }
     }
@@ -176,9 +296,28 @@ mod tests {
             label: String::new(),
             seconds: 0.0,
             approx_tokens: 5,
+            started_at: Local::now(),
         };
         assert_eq!(idle.tokens_per_second(), 0.0);
         assert_eq!(estimated_tokens("  \n"), 0);
+    }
+
+    #[test]
+    fn active_models_track_lifecycle() {
+        let tracker = ActiveModels::default();
+        assert!(tracker.snapshot().is_empty());
+        let id = tracker.start("STT", "whisper-turbo", Some("Transcribing".into()));
+        let active = tracker.snapshot();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].kind, "STT");
+        assert_eq!(active[0].model, "whisper-turbo");
+        assert_eq!(active[0].detail.as_deref(), Some("Transcribing"));
+        tracker.update(id, "whisper-turbo-tr", Some("50%".into()));
+        let updated = tracker.snapshot();
+        assert_eq!(updated[0].model, "whisper-turbo-tr");
+        assert_eq!(updated[0].detail.as_deref(), Some("50%"));
+        tracker.finish(id);
+        assert!(tracker.snapshot().is_empty());
     }
 
     #[test]

@@ -65,7 +65,9 @@ pub use lokalbot_speech::{
 };
 pub use models::SpeechRequirements;
 pub use recording::recover_unfinished_recordings;
-pub use resources::{GenerationMetric, LoadedModel, ResourceSampler, ResourceSnapshot};
+pub use resources::{
+    ActiveModelRun, GenerationMetric, LoadedModel, ResourceSampler, ResourceSnapshot,
+};
 pub use selection::{SelectionPhase, SelectionView};
 pub use speak::EXPORT_KEY as SPEECH_EXPORT_KEY;
 pub use speech::{ExecutionDevice, MultiSttConfig, SpeechCache, SttModelSlot};
@@ -82,6 +84,7 @@ pub(crate) struct Shared {
     pub dictation_working: AtomicBool,
     pub dictation_state: Arc<Mutex<dictation::State>>,
     pub speech: Arc<speech::SpeechCache>,
+    pub active_models: resources::ActiveModels,
     pub generation_metrics: resources::GenerationMetrics,
     pub runtime: lokalbot_ai::runtime::RuntimeManager,
     background: Mutex<Vec<BackgroundItem>>,
@@ -124,6 +127,7 @@ impl Shared {
             dictation_working: AtomicBool::new(false),
             dictation_state: Default::default(),
             speech: Arc::new(speech::SpeechCache::default()),
+            active_models: Default::default(),
             generation_metrics: Default::default(),
             runtime,
             background: Mutex::new(Vec::new()),
@@ -200,6 +204,15 @@ impl Shared {
             items.clone()
         };
         self.emit(EngineEvent::Background(snapshot));
+    }
+
+    pub(crate) fn begin_model_run(
+        &self,
+        kind: impl Into<String>,
+        model: impl Into<String>,
+        detail: Option<String>,
+    ) -> resources::ModelRunGuard<'_> {
+        resources::ModelRunGuard::new(&self.active_models, kind, model, detail)
     }
 
     pub fn think(&self, settings: &Settings) -> Result<lokalbot_ai::think::ThinkClient> {
@@ -369,6 +382,10 @@ impl Engine {
 
     pub fn recent_generations(&self) -> Vec<GenerationMetric> {
         self.shared.generation_metrics.recent()
+    }
+
+    pub fn active_models(&self) -> Vec<ActiveModelRun> {
+        self.shared.active_models.snapshot()
     }
 }
 

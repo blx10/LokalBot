@@ -1317,6 +1317,13 @@ pub const ENTRIES: &[Entry] = &[
         value: details,
     },
     Entry {
+        id: "settings.showModelMetrics",
+        title: "Show live model metrics in sidebar",
+        category: Advanced,
+        aliases: "metrics model tokens tok/s performance hud status bar live sidebar",
+        value: |s| on_off(s.show_model_metrics),
+    },
+    Entry {
         id: "settings.resourceMonitor",
         title: "Resource Monitor",
         category: Advanced,
